@@ -1,4 +1,5 @@
 import AVFoundation
+import Accelerate
 import Foundation
 
 /// Health events a recorder reports to the session. Events accelerate
@@ -27,6 +28,7 @@ struct SegmentStats: Sendable {
     var framesWritten: Int64
     var sampleRateHz: Int
     var channels: Int
+    var lastActiveMs: Int? = nil
 }
 
 /// The operations `RecordingSession` needs from a capture path. One start/stop
@@ -115,7 +117,8 @@ final class SegmentFile: @unchecked Sendable {
             bufferEndMs: startMs + durationMs,
             frames: frames,
             durationMs: durationMs,
-            allZero: Self.isAllZero(buffer)
+            allZero: Self.isAllZero(buffer),
+            level: Self.rms(buffer)
         )
         return nil
     }
@@ -139,8 +142,29 @@ final class SegmentFile: @unchecked Sendable {
             lastBufferEndMs: snap.lastBufferEndMs,
             framesWritten: snap.framesWritten,
             sampleRateHz: sampleRateHz,
-            channels: channels
+            channels: channels,
+            lastActiveMs: snap.lastActiveMs
         )
+    }
+
+    /// Buffer RMS across all channels for the level meter and activity
+    /// detection. vDSP keeps it allocation-free on the real-time thread.
+    private static func rms(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let channels = buffer.floatChannelData else { return 0 }
+        let frames = Int(buffer.frameLength)
+        let planes = buffer.format.isInterleaved ? 1 : Int(buffer.format.channelCount)
+        let samplesPerPlane =
+            buffer.format.isInterleaved
+            ? frames * Int(buffer.format.channelCount)
+            : frames
+        guard samplesPerPlane > 0 else { return 0 }
+        var loudest: Float = 0
+        for plane in 0..<planes {
+            var value: Float = 0
+            vDSP_rmsqv(channels[plane], 1, &value, vDSP_Length(samplesPerPlane))
+            loudest = max(loudest, value)
+        }
+        return loudest
     }
 
     /// Exact-zero check for the silence diagnostic. Early-exits on the first

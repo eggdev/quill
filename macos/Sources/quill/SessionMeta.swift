@@ -30,6 +30,17 @@ struct SessionMeta: Codable, Equatable, Sendable {
     var duration_seconds: Int
     var status: TrackStatus
     var tracks: [Track]
+    /// The calendar meeting the session was recorded for. Optional and
+    /// additive: absent for manual recordings and for every older session.
+    var meeting: Meeting? = nil
+
+    struct Meeting: Codable, Equatable, Sendable {
+        var title: String
+        var calendar: String
+        var scheduled_start: String
+        var scheduled_end: String
+        var video_link: String?
+    }
 
     /// One transcription input: a segment file, who speaks on it, and where
     /// it starts on the session clock. Both schema versions normalize to an
@@ -75,6 +86,12 @@ struct SessionMeta: Codable, Equatable, Sendable {
             return (inputs, meta.status)
         }
         return (try v1Inputs(data: data, url: url), nil)
+    }
+
+    /// The session's calendar meeting, if meta.json records one.
+    static func meeting(in dir: URL) -> Meeting? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")) else { return nil }
+        return (try? JSONDecoder().decode(SessionMeta.self, from: data))?.meeting
     }
 
     // MARK: -

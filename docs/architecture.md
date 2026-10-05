@@ -61,7 +61,11 @@ schema v2 is the shared contract for that:
 - each segment records `file`, `start_offset_ms`, `end_offset_ms`,
   `frames_written`, `sample_rate_hz`, and `channels`;
 - each interruption records `detected_offset_ms`, `recovered_offset_ms`
-  (absent when unrecovered), `reason`, `attempts`, and an optional `error`.
+  (absent when unrecovered), `reason`, `attempts`, and an optional `error`;
+- an optional `meeting` object (`title`, `calendar`, `scheduled_start`,
+  `scheduled_end`, optional `video_link`) when the session was recorded for a
+  calendar meeting. It is additive: readers ignore it when absent, and it
+  titles the readable transcript when present.
 
 Rules the schema encodes:
 

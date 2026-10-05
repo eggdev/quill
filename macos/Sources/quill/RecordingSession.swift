@@ -37,6 +37,9 @@ final class RecordingSession {
 
     let dir: URL
     let startedAt = Date()
+    /// The calendar meeting this session records, if any; written to
+    /// meta.json and used as the transcript title.
+    var meeting: SessionMeta.Meeting?
 
     /// Fired on the main actor when the visible capture status changes.
     var onStatus: ((CaptureStatus) -> Void)?
@@ -53,6 +56,8 @@ final class RecordingSession {
         var segmentIndex = 1
         var pendingRestart: (dueMs: Int, attempt: Int)?
         var lastBufferEndMs: Int?
+        /// Latest audible buffer across every segment of this track.
+        var lastActiveMs: Int?
 
         init(recorder: any TrackRecorder) {
             self.recorder = recorder
@@ -167,7 +172,8 @@ final class RecordingSession {
             ended: iso.string(from: ended),
             duration_seconds: Int(ended.timeIntervalSince(startedAt)),
             status: worst,
-            tracks: trackMetas
+            tracks: trackMetas,
+            meeting: meeting
         )
         do {
             try meta.write(to: dir)
@@ -175,6 +181,31 @@ final class RecordingSession {
             FileHandle.standardError.write(Data("meta.json write failed: \(error)\n".utf8))
         }
         return StopResult(dir: dir, status: worst)
+    }
+
+    /// Live per-track input level (RMS, 0...1) for the floating indicator.
+    /// A track with no buffer in the last half second reads as silent.
+    func levels() -> [TrackKind: Float] {
+        let now = nowMs()
+        var result: [TrackKind: Float] = [:]
+        for track in tracks {
+            let t = track.recorder.telemetry()
+            let fresh = t.lastWriteMs.map { now - $0 < 500 } ?? false
+            result[track.recorder.kind] = fresh ? t.level : 0
+        }
+        return result
+    }
+
+    /// Milliseconds since either track last carried audible sound (or since
+    /// the session started, if neither has). Drives calendar auto-stop.
+    func quietMs() -> Int {
+        let now = nowMs()
+        var lastActive = 0
+        for track in tracks {
+            let current = track.recorder.telemetry().lastActiveMs
+            lastActive = max(lastActive, track.lastActiveMs ?? 0, current ?? 0)
+        }
+        return max(0, now - lastActive)
     }
 
     /// One watchdog pass. Internal so orchestration tests can drive time
@@ -302,6 +333,9 @@ final class RecordingSession {
     /// there is nothing to transcribe or align.
     private func record(_ stats: SegmentStats?, into track: TrackState) {
         guard let stats else { return }
+        if let active = stats.lastActiveMs {
+            track.lastActiveMs = max(track.lastActiveMs ?? 0, active)
+        }
         if let end = stats.lastBufferEndMs {
             track.lastBufferEndMs = max(track.lastBufferEndMs ?? 0, end)
         }
