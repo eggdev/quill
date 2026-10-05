@@ -76,6 +76,8 @@ struct CallDetector: Sendable {
     struct Timing: Sendable {
         var startAfter: TimeInterval = 5
         var endAfter: TimeInterval = 30
+        /// Ask mode: an unanswered prompt goes away after this long.
+        var promptTimeout: TimeInterval = 600
     }
 
     var mode: Mode
@@ -83,6 +85,7 @@ struct CallDetector: Sendable {
     private(set) var handled: Set<String> = []
     /// Ask mode: the call currently offered for recording.
     private(set) var prompting: Call?
+    private var promptShownAt: Date?
     /// When each app took the mic, and when it let go (while still inside
     /// the end debounce).
     private var holdingSince: [String: Date] = [:]
@@ -131,6 +134,12 @@ struct CallDetector: Sendable {
             return nil
         }
         if mode == .ask {
+            if call.id != prompting?.id { promptShownAt = now }
+            // Unanswered for long enough: treat it as skipped.
+            if let shown = promptShownAt, now.timeIntervalSince(shown) >= timing.promptTimeout {
+                markHandled(call)
+                return nil
+            }
             prompting = call
             return nil
         }

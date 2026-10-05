@@ -160,6 +160,40 @@ final class MeetingSchedulerTests: XCTestCase {
         XCTAssertNil(s.decide(now: at(200), meetings: [m], recording: .manual, quiet: 0, callEnded: true))
     }
 
+    func testUserStopRetiresMeetingsUnderWay() {
+        var s = MeetingScheduler(mode: .ask)
+        let a = meeting("a", 0, 60)
+        let later = meeting("later", 90, 120)
+        s.userStopped(now: at(49), meetings: [a, later])
+        // No prompt for the meeting the user just left…
+        XCTAssertNil(s.decide(now: at(49), meetings: [a, later], recording: .idle, quiet: 0))
+        XCTAssertNil(s.prompting)
+        // …but later meetings are untouched.
+        _ = s.decide(now: at(90), meetings: [a, later], recording: .idle, quiet: 0)
+        XCTAssertEqual(s.prompting, later)
+    }
+
+    func testHandledSurvivesIdentifierChange() {
+        var s = MeetingScheduler(mode: .auto)
+        let m = meeting("a", 0, 30)
+        s.markHandled(m)
+        var resynced = m
+        resynced.id = "new-eventkit-id"
+        XCTAssertNil(s.decide(now: at(5), meetings: [resynced], recording: .idle, quiet: 0))
+    }
+
+    func testUnansweredPromptExpires() {
+        var s = MeetingScheduler(mode: .ask)
+        let m = meeting("a", 0, 60)
+        _ = s.decide(now: at(0), meetings: [m], recording: .idle, quiet: 0)
+        _ = s.decide(now: at(9), meetings: [m], recording: .idle, quiet: 0)
+        XCTAssertEqual(s.prompting, m)
+        _ = s.decide(now: at(10), meetings: [m], recording: .idle, quiet: 0)
+        XCTAssertNil(s.prompting)
+        _ = s.decide(now: at(11), meetings: [m], recording: .idle, quiet: 0)
+        XCTAssertNil(s.prompting)
+    }
+
     func testPrefersMostRecentlyStartedOverlap() {
         var s = MeetingScheduler(mode: .auto)
         let block = meeting("block", 0, 120)

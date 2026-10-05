@@ -53,9 +53,9 @@ quill can start recording on its own when a meeting begins. Choose
 **Calendar meetings** in the menu:
 
 - **Off** (default) — record only when you click.
-- **Ask when a meeting starts** — the floating feather appears with a red
-  record dot and a notification; click it → **Record this meeting** or
-  **Skip this meeting**.
+- **Ask when a meeting starts** — a floating prompt reading *Record
+  “Weekly sync”?* appears, with a notification. Click it to record, or ✕ to
+  skip. An unanswered prompt goes away after 10 minutes.
 - **Record automatically** — recording starts a minute before the meeting,
   with a notification and the floating indicator.
 
@@ -83,7 +83,8 @@ When a meeting recording stops:
 - at the start of a back-to-back meeting, which gets its own session (in ask
   mode, quill stops and prompts for the next one).
 
-A meeting triggers once: stop it by hand and it won't restart. Recordings you
+A meeting triggers once: stop it by hand and neither it nor anything else
+under way at that moment is offered or started again. Recordings you
 start yourself are never stopped automatically — if one overlaps a meeting it
 still takes the meeting's title. The meeting is recorded in `meta.json`
 (`meeting`) and titles `transcript.md` and the notifications.
@@ -92,8 +93,8 @@ still takes the meeting's title. The meeting is recorded in `meta.json`
 
 With calendar meetings on, quill also notices ad-hoc calls: when Zoom,
 Teams, Webex, Slack, or FaceTime has held the microphone for 5 seconds, the
-floating feather appears with a record dot and a notification ("Teams call
-detected") — click it → **Record this call** or **Skip this call**. The
+same floating prompt appears (*Record “Teams call”?*) with a notification
+("Teams call detected") — click it to record, or ✕ to skip. The
 recording is titled "Teams call" and stops 30 seconds after the app releases
 the mic (a brief drop or device switch doesn't end it). If a calendar meeting
 comes due while an ad-hoc call is being recorded, the recording takes the

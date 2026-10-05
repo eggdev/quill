@@ -10,6 +10,11 @@ struct Meeting: Equatable, Sendable {
     var end: Date
     var calendar: String
     var videoLink: URL?
+
+    /// Identity that survives the calendar re-identifying an event. Exchange
+    /// and CalDAV syncs can hand the same occurrence a new EventKit
+    /// identifier, so "already handled" also matches on title + start.
+    var key: String { "\(title)|\(Int(start.timeIntervalSince1970))" }
 }
 
 /// The raw fields of a calendar event, decoupled from EventKit so selection
@@ -139,6 +144,8 @@ struct MeetingScheduler: Sendable {
         var quietAnytime: TimeInterval = 600
         /// Hard stop this long after the scheduled end.
         var maxOverrun: TimeInterval = 3600
+        /// Ask mode: an unanswered prompt goes away after this long.
+        var promptTimeout: TimeInterval = 600
     }
 
     var mode: Mode
@@ -146,6 +153,7 @@ struct MeetingScheduler: Sendable {
     private(set) var handled: Set<String> = []
     /// Ask mode: the meeting currently offered for recording.
     private(set) var prompting: Meeting?
+    private var promptShownAt: Date?
 
     init(mode: Mode, timing: Timing = Timing()) {
         self.mode = mode
@@ -154,7 +162,21 @@ struct MeetingScheduler: Sendable {
 
     mutating func markHandled(_ meeting: Meeting) {
         handled.insert(meeting.id)
-        if prompting?.id == meeting.id { prompting = nil }
+        handled.insert(meeting.key)
+        if let prompting, isHandled(prompting) { self.prompting = nil }
+    }
+
+    func isHandled(_ meeting: Meeting) -> Bool {
+        handled.contains(meeting.id) || handled.contains(meeting.key)
+    }
+
+    /// The user stopped a recording: every meeting under way right now is
+    /// done, so stopping never turns straight into a prompt or a restart for
+    /// the meeting they just left.
+    mutating func userStopped(now: Date, meetings: [Meeting]) {
+        for meeting in meetings where inWindow(meeting, now: now) {
+            markHandled(meeting)
+        }
     }
 
     /// One scheduling pass. `quiet` is how long both tracks have been below
@@ -173,12 +195,24 @@ struct MeetingScheduler: Sendable {
         case .idle:
             let due = dueMeeting(now: now, meetings: meetings)
             if mode == .ask {
+                guard let due else {
+                    prompting = nil
+                    return nil
+                }
+                if due.key != prompting?.key { promptShownAt = now }
+                // Unanswered for long enough: the user isn't recording this
+                // one. Treat it as skipped.
+                if let shown = promptShownAt, now.timeIntervalSince(shown) >= timing.promptTimeout {
+                    markHandled(due)
+                    prompting = nil
+                    return nil
+                }
                 prompting = due
                 return nil
             }
             prompting = nil
             guard let due else { return nil }
-            handled.insert(due.id)
+            markHandled(due)
             return .start(due)
 
         case .manual:
@@ -192,11 +226,11 @@ struct MeetingScheduler: Sendable {
             // meeting never interrupts one still in its slot.
             if now >= current.end,
                 let next = meetings.last(where: {
-                    $0.id != current.id && !handled.contains($0.id) && $0.start <= now && now < $0.end
+                    $0.key != current.key && !isHandled($0) && $0.start <= now && now < $0.end
                 })
             {
                 guard mode == .auto else { return .stop(.nextMeeting) }
-                handled.insert(next.id)
+                markHandled(next)
                 return .roll(to: next)
             }
             if callEnded { return .stop(.callEnded) }
@@ -212,12 +246,17 @@ struct MeetingScheduler: Sendable {
     /// specific event (a call inside a longer block).
     private func dueMeeting(now: Date, meetings: [Meeting]) -> Meeting? {
         meetings
-            .filter { !handled.contains($0.id) && $0.start.addingTimeInterval(-timing.lead) <= now && now < $0.end }
+            .filter { !isHandled($0) && inWindow($0, now: now) }
             .max { $0.start < $1.start }
+    }
+
+    /// Whether `now` falls in the meeting's slot, lead time included.
+    func inWindow(_ meeting: Meeting, now: Date) -> Bool {
+        meeting.start.addingTimeInterval(-timing.lead) <= now && now < meeting.end
     }
 
     /// The next meeting that hasn't ended or been handled, for the menu.
     func upcoming(now: Date, meetings: [Meeting]) -> Meeting? {
-        meetings.first { !handled.contains($0.id) && $0.end > now }
+        meetings.first { !isHandled($0) && $0.end > now }
     }
 }

@@ -56,6 +56,19 @@ final class CallDetectorTests: XCTestCase {
         XCTAssertNil(d.decide(now: at(131), holding: [], recording: .idle, meetingDue: false))
     }
 
+    func testUnansweredCallPromptExpires() {
+        var d = CallDetector(mode: .ask)
+        _ = d.decide(now: at(0), holding: ["Teams"], recording: .idle, meetingDue: false)
+        _ = d.decide(now: at(5), holding: ["Teams"], recording: .idle, meetingDue: false)
+        XCTAssertNotNil(d.prompting)
+        _ = d.decide(now: at(604), holding: ["Teams"], recording: .idle, meetingDue: false)
+        XCTAssertNotNil(d.prompting)
+        _ = d.decide(now: at(605), holding: ["Teams"], recording: .idle, meetingDue: false)
+        XCTAssertNil(d.prompting)
+        _ = d.decide(now: at(700), holding: ["Teams"], recording: .idle, meetingDue: false)
+        XCTAssertNil(d.prompting)
+    }
+
     func testStoppedByHandNeverRestarts() {
         var d = CallDetector(mode: .auto)
         _ = d.decide(now: at(0), holding: ["Teams"], recording: .idle, meetingDue: false)

@@ -130,7 +130,9 @@ final class AppController {
         menuBar.update(.idle)
 
         indicator.levelSource = { [weak self] in self?.session?.levels() ?? [:] }
-        indicator.menuProvider = { [weak self] state in self?.indicatorMenu(state) ?? NSMenu() }
+        indicator.menuProvider = { [weak self] in self?.recordingMenu() ?? NSMenu() }
+        indicator.onRecord = { [weak self] in self?.acceptPrompt() }
+        indicator.onSkip = { [weak self] in self?.skipPrompt() }
         calendar.onChange = { [weak self] in self?.reloadMeetings() }
         micUsage.onChange = { [weak self] in self?.calendarTick() }
 
@@ -170,8 +172,18 @@ final class AppController {
             if let current { scheduler.markHandled(current) }
             startSession(.manual(current ?? calls.currentCall.map(Self.meeting(for:))))
         } else {
-            stopSession()
+            userStop()
         }
+    }
+
+    /// A stop the user asked for (menu bar or capsule). Whatever meeting or
+    /// call is under way is done — it must not come straight back as a
+    /// prompt or an auto-start.
+    private func userStop() {
+        stopSession()
+        scheduler.userStopped(now: Date(), meetings: meetings)
+        if let call = calls.currentCall { calls.markHandled(call) }
+        updateIndicator()
     }
 
     private func startSession(_ origin: Origin) {
@@ -312,7 +324,7 @@ final class AppController {
         // An ad-hoc call recording becomes the calendar meeting once one is
         // due — the user joined early, and the meeting's title and stop
         // rules are the better fit.
-        if session != nil, case .call = origin, let due = currentMeeting(), !scheduler.handled.contains(due.id) {
+        if session != nil, case .call = origin, let due = currentMeeting(), !scheduler.isHandled(due) {
             scheduler.markHandled(due)
             origin = .meeting(due)
             session?.meeting = Self.metaMeeting(due)
@@ -383,7 +395,7 @@ final class AppController {
             break
         }
 
-        if let prompt = scheduler.prompting, prompt.id != wasPrompting?.id {
+        if let prompt = scheduler.prompting, prompt.key != wasPrompting?.key {
             notifyUser(title: "quill — “\(prompt.title)” is starting", body: "Click the floating feather to record it.")
         }
         if scheduler.prompting == nil, let call = calls.prompting, call.id != wasCallPrompt?.id {
@@ -447,68 +459,53 @@ final class AppController {
         }
         if session != nil {
             indicator.update(indicatorSuppressed ? .hidden : .recording(warning: captureStatus.display != .healthy))
-        } else if scheduler.prompting != nil || calls.prompting != nil {
-            indicator.update(.prompt)
+        } else if let title = scheduler.prompting?.title ?? calls.prompting?.title {
+            indicator.update(.prompt(title: title))
         } else {
             indicator.update(.hidden)
         }
     }
 
-    private func indicatorMenu(_ state: RecordingIndicator.State) -> NSMenu {
+    /// The prompt was clicked: record the offered meeting, or else the
+    /// offered call.
+    private func acceptPrompt() {
+        guard session == nil else { return }
+        if let meeting = scheduler.prompting {
+            scheduler.markHandled(meeting)
+            startSession(.meeting(meeting))
+        } else if let call = calls.prompting {
+            calls.markHandled(call)
+            startSession(.call(call))
+        }
+        updateIndicator()
+    }
+
+    private func skipPrompt() {
+        if let meeting = scheduler.prompting {
+            scheduler.markHandled(meeting)
+        } else if let call = calls.prompting {
+            calls.markHandled(call)
+        }
+        updateIndicator()
+    }
+
+    private func recordingMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        func header(_ title: String) {
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-        }
-        switch state {
-        case .prompt:
-            guard let meeting = scheduler.prompting else {
-                guard let call = calls.prompting else { return menu }
-                header("\(call.title) · since \(Self.meetingTime(call.start))")
-                menu.addItem(.separator())
-                menu.addItem(
-                    ActionMenuItem("Record this call") { [weak self] in
-                        guard let self, self.session == nil else { return }
-                        self.calls.markHandled(call)
-                        self.startSession(.call(call))
-                    })
-                menu.addItem(
-                    ActionMenuItem("Skip this call") { [weak self] in
-                        self?.calls.markHandled(call)
-                        self?.updateIndicator()
-                    })
-                break
-            }
-            header("\(meeting.title) · \(Self.meetingTime(meeting.start))")
+        if let session {
+            let elapsed = Self.format(Date().timeIntervalSince(session.startedAt))
+            let header = NSMenuItem(
+                title: "● \(origin.meeting?.title ?? "recording") · \(elapsed)", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
             menu.addItem(.separator())
-            menu.addItem(
-                ActionMenuItem("Record this meeting") { [weak self] in
-                    guard let self, self.session == nil else { return }
-                    self.scheduler.markHandled(meeting)
-                    self.startSession(.meeting(meeting))
-                })
-            menu.addItem(
-                ActionMenuItem("Skip this meeting") { [weak self] in
-                    self?.scheduler.markHandled(meeting)
-                    self?.updateIndicator()
-                })
-        case .recording:
-            if let session {
-                let elapsed = Self.format(Date().timeIntervalSince(session.startedAt))
-                header("● \(origin.meeting?.title ?? "recording") · \(elapsed)")
-            }
-            menu.addItem(.separator())
-            menu.addItem(ActionMenuItem("Stop recording") { [weak self] in self?.stopSession() })
-            menu.addItem(
-                ActionMenuItem("Hide until next recording") { [weak self] in
-                    self?.indicatorSuppressed = true
-                    self?.updateIndicator()
-                })
-        case .hidden:
-            return menu
         }
+        menu.addItem(ActionMenuItem("Stop recording") { [weak self] in self?.userStop() })
+        menu.addItem(
+            ActionMenuItem("Hide until next recording") { [weak self] in
+                self?.indicatorSuppressed = true
+                self?.updateIndicator()
+            })
         menu.addItem(.separator())
         menu.addItem(ActionMenuItem("Open recordings folder") { [weak self] in self?.openFolder() })
         return menu

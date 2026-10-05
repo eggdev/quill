@@ -9,8 +9,9 @@
   back-to-back meeting, and never restart after being stopped by hand.
 - Added a floating recording indicator: a draggable capsule with live mic and
   system-audio level bars, visible across Spaces and full-screen apps and
-  excluded from screen sharing. Clicking it stops the recording or answers
-  the meeting prompt.
+  excluded from screen sharing. Clicking it stops the recording. In ask mode
+  it becomes a labeled "Record “…”?" prompt with a ✕ to skip, which expires
+  after 10 minutes unanswered.
 - Added ad-hoc call detection: when Zoom, Teams, Webex, Slack, or FaceTime
   holds the microphone with no calendar meeting due, quill offers to record
   the call (or records it, with `calendar.adhoc_calls: "auto"`) and stops 30 s

@@ -67,7 +67,9 @@ final class MeetingCalendar {
 
     private static func entry(_ event: EKEvent) -> CalendarEntry {
         let me = event.attendees?.first { $0.isCurrentUser }
-        let base = event.eventIdentifier ?? event.calendarItemIdentifier
+        // The server's identifier (Exchange item ID, CalDAV UID) is stable
+        // across syncs; eventIdentifier can change when a source re-syncs.
+        let base = event.calendarItemExternalIdentifier ?? event.calendarItemIdentifier
         let title = event.title ?? ""
         return CalendarEntry(
             id: "\(base)@\(Int(event.startDate.timeIntervalSince1970))",
