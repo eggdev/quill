@@ -118,7 +118,7 @@ enum DoctorReport {
             return Check(
                 name: "calendar",
                 status: .warn("access denied — meetings won't be \(mode == .auto ? "recorded" : "offered")"),
-                remediation: "System Settings → Privacy & Security → Calendars → enable full access for quill (or your terminal)"
+                remediation: "\(MeetingCalendar.settingsPath) → enable full access for quill (or your terminal)"
             )
         }
     }

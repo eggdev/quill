@@ -46,10 +46,6 @@ struct MeetingApp: Equatable, Sendable {
 /// for `endAfter` (rides out reconnects and device switches). Each call
 /// triggers at most once.
 struct CallDetector: Sendable {
-    enum Mode: String, Sendable, CaseIterable {
-        case off, ask, auto
-    }
-
     struct Call: Equatable, Sendable {
         /// Unique per call: app name plus when it took the mic.
         var id: String
@@ -80,31 +76,33 @@ struct CallDetector: Sendable {
         var promptTimeout: TimeInterval = 600
     }
 
-    var mode: Mode
+    var mode: AutoRecordMode
     var timing = Timing()
     private(set) var handled: Set<String> = []
+    private var prompt = PromptTimer<Call>()
     /// Ask mode: the call currently offered for recording.
-    private(set) var prompting: Call?
-    private var promptShownAt: Date?
+    var prompting: Call? { prompt.item }
+    /// The ongoing call as of the latest `decide`, debounced at both ends;
+    /// the earliest wins when two apps hold the mic.
+    private(set) var currentCall: Call?
     /// When each app took the mic, and when it let go (while still inside
     /// the end debounce).
     private var holdingSince: [String: Date] = [:]
     private var releasedSince: [String: Date] = [:]
-    /// The latest `decide` time, so `currentCall` applies the same debounce.
-    private var lastNow = Date.distantPast
 
-    init(mode: Mode, timing: Timing = Timing()) {
+    init(mode: AutoRecordMode, timing: Timing = Timing()) {
         self.mode = mode
         self.timing = timing
     }
 
-    /// The ongoing call, debounced at both ends; the earliest wins when two
-    /// apps hold the mic.
-    var currentCall: Call? { currentCall(now: lastNow) }
-
     mutating func markHandled(_ call: Call) {
         handled.insert(call.id)
-        if prompting?.id == call.id { prompting = nil }
+        if prompting?.id == call.id { prompt.clear() }
+    }
+
+    /// The user stopped a recording: the call under way is done.
+    mutating func userStopped() {
+        if let currentCall { markHandled(currentCall) }
     }
 
     /// One pass. `holding` is the set of meeting-app names holding the mic;
@@ -113,12 +111,12 @@ struct CallDetector: Sendable {
     mutating func decide(
         now: Date, holding: Set<String>, recording: Recording, meetingDue: Bool
     ) -> Action? {
-        lastNow = now
         observe(now: now, holding: holding)
-        let call = currentCall(now: now)
+        let call = ongoingCall(now: now)
+        currentCall = call
 
         if case .call(let recorded) = recording {
-            prompting = nil
+            prompt.clear()
             // The app let go for good, or a different call took over.
             return call?.id == recorded.id ? nil : .stop
         }
@@ -126,24 +124,19 @@ struct CallDetector: Sendable {
             // The call belongs to the running recording or to the meeting
             // the calendar is handling; never offer it separately later.
             if let call { handled.insert(call.id) }
-            prompting = nil
+            prompt.clear()
             return nil
         }
         guard mode != .off, let call, !handled.contains(call.id) else {
-            prompting = nil
+            prompt.clear()
             return nil
         }
         if mode == .ask {
-            if call.id != prompting?.id { promptShownAt = now }
             // Unanswered for long enough: treat it as skipped.
-            if let shown = promptShownAt, now.timeIntervalSince(shown) >= timing.promptTimeout {
-                markHandled(call)
-                return nil
-            }
-            prompting = call
+            if !prompt.offer(call, key: call.id, now: now, timeout: timing.promptTimeout) { markHandled(call) }
             return nil
         }
-        prompting = nil
+        prompt.clear()
         handled.insert(call.id)
         return .start(call)
     }
@@ -166,7 +159,7 @@ struct CallDetector: Sendable {
         }
     }
 
-    private func currentCall(now: Date) -> Call? {
+    private func ongoingCall(now: Date) -> Call? {
         holdingSince
             .filter { app, since in
                 // Before the start debounce elapses, a brief grab doesn't

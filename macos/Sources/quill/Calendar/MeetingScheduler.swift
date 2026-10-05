@@ -93,10 +93,6 @@ struct MeetingFilter: Sendable {
 /// after it starts, is dismissed, or is stopped by hand it is `handled`, so
 /// stopping an auto-recording never restarts it on the next tick.
 struct MeetingScheduler: Sendable {
-    enum Mode: String, Sendable, CaseIterable {
-        case off, ask, auto
-    }
-
     enum Recording: Equatable, Sendable {
         case idle
         /// Started by hand: never auto-stopped.
@@ -148,14 +144,14 @@ struct MeetingScheduler: Sendable {
         var promptTimeout: TimeInterval = 600
     }
 
-    var mode: Mode
+    var mode: AutoRecordMode
     var timing = Timing()
     private(set) var handled: Set<String> = []
+    private var prompt = PromptTimer<Meeting>()
     /// Ask mode: the meeting currently offered for recording.
-    private(set) var prompting: Meeting?
-    private var promptShownAt: Date?
+    var prompting: Meeting? { prompt.item }
 
-    init(mode: Mode, timing: Timing = Timing()) {
+    init(mode: AutoRecordMode, timing: Timing = Timing()) {
         self.mode = mode
         self.timing = timing
     }
@@ -163,7 +159,7 @@ struct MeetingScheduler: Sendable {
     mutating func markHandled(_ meeting: Meeting) {
         handled.insert(meeting.id)
         handled.insert(meeting.key)
-        if let prompting, isHandled(prompting) { self.prompting = nil }
+        if let prompting, isHandled(prompting) { prompt.clear() }
     }
 
     func isHandled(_ meeting: Meeting) -> Bool {
@@ -188,66 +184,56 @@ struct MeetingScheduler: Sendable {
         now: Date, meetings: [Meeting], recording: Recording, quiet: TimeInterval, callEnded: Bool = false
     ) -> Action? {
         guard mode != .off else {
-            prompting = nil
+            prompt.clear()
             return nil
         }
-        switch recording {
-        case .idle:
-            let due = dueMeeting(now: now, meetings: meetings)
-            if mode == .ask {
-                guard let due else {
-                    prompting = nil
-                    return nil
-                }
-                if due.key != prompting?.key { promptShownAt = now }
-                // Unanswered for long enough: the user isn't recording this
-                // one. Treat it as skipped.
-                if let shown = promptShownAt, now.timeIntervalSince(shown) >= timing.promptTimeout {
-                    markHandled(due)
-                    prompting = nil
-                    return nil
-                }
-                prompting = due
+        guard case .meeting(let current) = recording else {
+            // Idle or a hand-started recording: only an idle app starts or
+            // offers anything.
+            guard recording == .idle, let due = dueMeeting(now: now, meetings: meetings) else {
+                prompt.clear()
                 return nil
             }
-            prompting = nil
-            guard let due else { return nil }
+            if mode == .ask {
+                // Unanswered for long enough: the user isn't recording this one.
+                if !prompt.offer(due, key: due.key, now: now, timeout: timing.promptTimeout) { markHandled(due) }
+                return nil
+            }
+            prompt.clear()
             markHandled(due)
             return .start(due)
-
-        case .manual:
-            prompting = nil
-            return nil
-
-        case .meeting(let current):
-            prompting = nil
-            // Back-to-back meetings: hand over once the current one is past
-            // its scheduled end and the next has begun. An overlapping
-            // meeting never interrupts one still in its slot.
-            if now >= current.end,
-                let next = meetings.last(where: {
-                    $0.key != current.key && !isHandled($0) && $0.start <= now && now < $0.end
-                })
-            {
-                guard mode == .auto else { return .stop(.nextMeeting) }
-                markHandled(next)
-                return .roll(to: next)
-            }
-            if callEnded { return .stop(.callEnded) }
-            if now >= current.end.addingTimeInterval(timing.maxOverrun) { return .stop(.overrun) }
-            if now >= current.end && quiet >= timing.quietAfterEnd { return .stop(.ended) }
-            if quiet >= timing.quietAnytime { return .stop(.quiet) }
-            return nil
         }
+        prompt.clear()
+        // Back-to-back meetings: hand over once the current one is past
+        // its scheduled end and the next has begun. An overlapping
+        // meeting never interrupts one still in its slot.
+        if now >= current.end,
+            let next = meetings.last(where: {
+                $0.key != current.key && !isHandled($0) && $0.start <= now && now < $0.end
+            })
+        {
+            guard mode == .auto else { return .stop(.nextMeeting) }
+            markHandled(next)
+            return .roll(to: next)
+        }
+        if callEnded { return .stop(.callEnded) }
+        if now >= current.end.addingTimeInterval(timing.maxOverrun) { return .stop(.overrun) }
+        if now >= current.end && quiet >= timing.quietAfterEnd { return .stop(.ended) }
+        if quiet >= timing.quietAnytime { return .stop(.quiet) }
+        return nil
     }
 
     /// The unhandled meeting whose window (lead included) contains `now`.
     /// With overlaps, the most recently started wins — it is the more
     /// specific event (a call inside a longer block).
     private func dueMeeting(now: Date, meetings: [Meeting]) -> Meeting? {
-        meetings
-            .filter { !isHandled($0) && inWindow($0, now: now) }
-            .max { $0.start < $1.start }
+        meetings.filter { !isHandled($0) && inWindow($0, now: now) }.max { $0.start < $1.start }
+    }
+
+    /// The meeting in progress right now, handled or not — what a manual
+    /// recording is titled after and what an ad-hoc call defers to.
+    func current(now: Date, meetings: [Meeting]) -> Meeting? {
+        meetings.filter { inWindow($0, now: now) }.max { $0.start < $1.start }
     }
 
     /// Whether `now` falls in the meeting's slot, lead time included.

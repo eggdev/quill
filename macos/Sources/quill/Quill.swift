@@ -76,48 +76,27 @@ struct Doctor: ParsableCommand {
 }
 
 /// Owns the menu bar, the floating indicator, the current recording session,
-/// the calendar scheduler, the ad-hoc call detector, and the elapsed-time
-/// ticker. All state transitions
-/// happen on the main actor.
+/// and the elapsed-time ticker, and carries out what `RecordingPolicy`
+/// decides. All state transitions happen on the main actor.
 @MainActor
 final class AppController {
-    /// Why the current session is recording. Only `.meeting` sessions are
-    /// stopped by the scheduler and only `.call` sessions by the call
-    /// detector; a manual session may still carry the meeting or call it
-    /// overlaps, for its title.
-    private enum Origin {
-        case manual(Meeting?)
-        case meeting(Meeting)
-        case call(CallDetector.Call)
-
-        var meeting: Meeting? {
-            switch self {
-            case .manual(let m): return m
-            case .meeting(let m): return m
-            case .call(let c): return AppController.meeting(for: c)
-            }
-        }
-    }
+    private typealias Origin = RecordingPolicy.Origin
 
     private let root: URL
     private let menuBar = MenuBarController()
     private let indicator = RecordingIndicator()
     private let calendar = MeetingCalendar()
+    private let micUsage = MicUsageMonitor()
     private let transcription = TranscriptionCoordinator()
     private var session: RecordingSession?
-    private var origin = Origin.manual(nil)
+    private var policy = RecordingPolicy()
     private var captureStatus = RecordingSession.CaptureStatus.allHealthy
     private var ticker: Timer?
-    private var scheduler = MeetingScheduler(mode: Config.calendarMode(), timing: Config.calendarTiming())
     private var meetings: [Meeting] = []
     private var meetingsFetchedAt = Date.distantPast
+    private var reloadPending = false
     private var calendarTimer: Timer?
     private var requestedCalendarAccess = false
-    private let micUsage = MicUsageMonitor()
-    private var calls = CallDetector(mode: Config.adhocCallMode())
-    /// A meeting app held the mic at some point during the current session,
-    /// so its letting go means the call is over.
-    private var sessionHadCall = false
     /// "Hide until next recording" from the indicator's menu.
     private var indicatorSuppressed = false
 
@@ -133,7 +112,7 @@ final class AppController {
         indicator.menuProvider = { [weak self] in self?.recordingMenu() ?? NSMenu() }
         indicator.onRecord = { [weak self] in self?.acceptPrompt() }
         indicator.onSkip = { [weak self] in self?.skipPrompt() }
-        calendar.onChange = { [weak self] in self?.reloadMeetings() }
+        calendar.onChange = { [weak self] in self?.scheduleReload() }
         micUsage.onChange = { [weak self] in self?.calendarTick() }
 
         Task { [transcription, root] in
@@ -165,24 +144,16 @@ final class AppController {
 
     private func toggle() {
         if session == nil {
-            // A hand-started recording during a meeting takes the meeting's
-            // title, and the meeting won't trigger again — but the scheduler
-            // never stops a recording the user started.
-            let current = currentMeeting()
-            if let current { scheduler.markHandled(current) }
-            startSession(.manual(current ?? calls.currentCall.map(Self.meeting(for:))))
+            startSession(policy.userStarting(now: Date(), meetings: meetings))
         } else {
             userStop()
         }
     }
 
-    /// A stop the user asked for (menu bar or capsule). Whatever meeting or
-    /// call is under way is done — it must not come straight back as a
-    /// prompt or an auto-start.
+    /// A stop the user asked for (menu bar or capsule).
     private func userStop() {
         stopSession()
-        scheduler.userStopped(now: Date(), meetings: meetings)
-        if let call = calls.currentCall { calls.markHandled(call) }
+        policy.userStopped(now: Date(), meetings: meetings)
         updateIndicator()
     }
 
@@ -204,10 +175,9 @@ final class AppController {
             }
             try newSession.start()
             session = newSession
-            self.origin = origin
+            policy.started(origin)
             captureStatus = .allHealthy
             indicatorSuppressed = false
-            sessionHadCall = false
             FileHandle.standardError.write(Data("● recording → \(newSession.dir.path)\n".utf8))
         } catch {
             FileHandle.standardError.write(Data("recording start failed: \(error)\n".utf8))
@@ -234,7 +204,7 @@ final class AppController {
                 "○ stopped · \(elapsed) · \(result.status.rawValue) · \(session.dir.path)\n".utf8
             ))
         self.session = nil
-        origin = .manual(nil)
+        policy.stopped()
         captureStatus = .allHealthy
         ticker?.invalidate()
         ticker = nil
@@ -275,9 +245,11 @@ final class AppController {
         case .degraded(let kind):
             display = .degraded(track: kind.label, elapsed: elapsed)
         }
-        menuBar.update(display, signalWarning: captureStatus.signalWarning, meetingTitle: origin.meeting?.title)
+        menuBar.update(display, signalWarning: captureStatus.signalWarning, meetingTitle: sessionTitle)
         updateIndicator()
     }
+
+    private var sessionTitle: String? { policy.origin?.meeting?.title }
 
     private func showTranscription(_ status: TranscriptionCoordinator.Status) {
         switch status {
@@ -296,15 +268,15 @@ final class AppController {
         refreshMenu()
     }
 
-    // MARK: - Calendar
+    // MARK: - Calendar and calls
 
-    /// One scheduling pass: keep the meeting list fresh, then let the
-    /// scheduler start, roll, or stop a meeting recording. Config is re-read
-    /// every pass, so edits to config.json apply without a restart.
+    /// One pass: keep the meeting list fresh, feed the policy a snapshot,
+    /// and carry out its action. Config is re-read every pass, so edits to
+    /// config.json apply without a restart.
     private func calendarTick() {
         let mode = Config.calendarMode()
-        scheduler.mode = mode
-        scheduler.timing = Config.calendarTiming()
+        let callMode = Config.adhocCallMode()
+        policy.configure(meetings: mode, calls: callMode, timing: Config.calendarTiming())
 
         if mode != .off {
             switch MeetingCalendar.access() {
@@ -316,93 +288,63 @@ final class AppController {
             case .denied:
                 meetings = []
             case .granted:
-                if Date().timeIntervalSince(meetingsFetchedAt) > 60 { reloadMeetings() }
+                // EKEventStoreChanged covers edits; the slow refetch only
+                // moves the 24 h window forward.
+                if Date().timeIntervalSince(meetingsFetchedAt) > 600 { reloadMeetings() }
             }
         }
 
-        let now = Date()
-        // An ad-hoc call recording becomes the calendar meeting once one is
-        // due — the user joined early, and the meeting's title and stop
-        // rules are the better fit.
-        if session != nil, case .call = origin, let due = currentMeeting(), !scheduler.isHandled(due) {
-            scheduler.markHandled(due)
-            origin = .meeting(due)
-            session?.meeting = Self.metaMeeting(due)
-        }
-
-        // Calls first: whether a meeting app let go of the mic feeds the
-        // scheduler's stop decision.
-        calls.mode = Config.adhocCallMode()
-        let callRecording: CallDetector.Recording
-        switch (session, origin) {
-        case (nil, _): callRecording = .idle
-        case (_, .call(let c)): callRecording = .call(c)
-        default: callRecording = .other
-        }
-        let wasCallPrompt = calls.prompting
-        let callAction = calls.decide(
-            now: now,
-            holding: micUsage.holdingApps(includeBrowsers: Config.browserCalls()),
-            recording: callRecording,
-            meetingDue: currentMeeting() != nil
-        )
-        if session != nil && calls.currentCall != nil { sessionHadCall = true }
-        let callEnded = sessionHadCall && calls.currentCall == nil
-
-        let recording: MeetingScheduler.Recording
-        switch (session, origin) {
-        case (nil, _): recording = .idle
-        case (_, .meeting(let m)): recording = .meeting(m)
-        default: recording = .manual
-        }
+        // The mic scan is the one costly input; skip it when nothing would
+        // use it (no call detection and no recording to end).
+        let holding =
+            callMode == .off && session == nil
+            ? [] : micUsage.holdingApps(includeBrowsers: Config.browserCalls())
         let quiet = session.map { TimeInterval($0.quietMs()) / 1000 } ?? 0
-        let wasPrompting = scheduler.prompting
+        let previousPrompt = policy.prompt
 
-        let action = scheduler.decide(
-            now: now, meetings: meetings, recording: recording, quiet: quiet, callEnded: callEnded)
-        switch action {
-        case .start(let meeting)?:
-            startSession(.meeting(meeting))
-            if session != nil {
-                notifyUser(title: "quill — recording “\(meeting.title)”", body: "Click the floating feather to stop.")
+        switch policy.tick(now: Date(), meetings: meetings, holding: holding, quiet: quiet) {
+        case .start(let origin)?:
+            startSession(origin)
+            if session != nil, let title = origin.meeting?.title {
+                notifyUser(title: "quill — recording “\(title)”", body: "Click the floating feather to stop.")
             }
-        case .roll(let meeting)?:
+        case .roll(let origin)?:
             stopSession()
-            startSession(.meeting(meeting))
+            startSession(origin)
         case .stop(let reason)?:
-            let title = origin.meeting?.title ?? "meeting"
+            let title = sessionTitle ?? "recording"
             stopSession()
             let next = Config.transcriptionEnabled() ? " · transcribing now." : "."
             notifyUser(title: "quill — stopped “\(title)”", body: reason.label.capitalizedFirst + next)
+        case .retitle(let origin)?:
+            session?.meeting = origin.meeting.map(Self.metaMeeting)
         case nil:
             break
         }
 
-        // The two never both act on one pass (a call action needs an idle or
-        // call recording the scheduler leaves alone); the guard keeps it so.
-        switch action == nil ? callAction : nil {
-        case .start(let call)?:
-            startSession(.call(call))
-            if session != nil {
-                notifyUser(title: "quill — recording “\(call.title)”", body: "Click the floating feather to stop.")
+        if let prompt = policy.prompt, prompt.key != previousPrompt?.key {
+            switch prompt {
+            case .meeting(let m):
+                notifyUser(title: "quill — “\(m.title)” is starting", body: "Click the floating prompt to record it.")
+            case .call(let c):
+                notifyUser(title: "quill — \(c.title) detected", body: "Click the floating prompt to record it.")
             }
-        case .stop?:
-            let title = origin.meeting?.title ?? "call"
-            stopSession()
-            let next = Config.transcriptionEnabled() ? " · transcribing now." : "."
-            notifyUser(title: "quill — stopped “\(title)”", body: "Call ended" + next)
-        case nil:
-            break
-        }
-
-        if let prompt = scheduler.prompting, prompt.key != wasPrompting?.key {
-            notifyUser(title: "quill — “\(prompt.title)” is starting", body: "Click the floating feather to record it.")
-        }
-        if scheduler.prompting == nil, let call = calls.prompting, call.id != wasCallPrompt?.id {
-            notifyUser(title: "quill — \(call.title) detected", body: "Click the floating feather to record it.")
         }
         refreshCalendarMenu(mode: mode)
         updateIndicator()
+    }
+
+    /// Calendar syncs post EKEventStoreChanged in bursts; refetch once per
+    /// burst, and not at all while meetings are off.
+    private func scheduleReload() {
+        guard !reloadPending, Config.calendarMode() != .off else { return }
+        reloadPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.reloadPending = false
+                self?.reloadMeetings()
+            }
+        }
     }
 
     private func reloadMeetings() {
@@ -410,7 +352,7 @@ final class AppController {
         meetingsFetchedAt = Date()
     }
 
-    private func setCalendarMode(_ mode: MeetingScheduler.Mode) {
+    private func setCalendarMode(_ mode: AutoRecordMode) {
         do {
             try Config.setCalendarMode(mode)
         } catch {
@@ -421,15 +363,7 @@ final class AppController {
         calendarTick()
     }
 
-    /// The meeting in progress right now (lead time included), if any.
-    private func currentMeeting() -> Meeting? {
-        guard scheduler.mode != .off else { return nil }
-        let now = Date()
-        return meetings.filter { $0.start.addingTimeInterval(-scheduler.timing.lead) <= now && now < $0.end }
-            .max { $0.start < $1.start }
-    }
-
-    private func refreshCalendarMenu(mode: MeetingScheduler.Mode) {
+    private func refreshCalendarMenu(mode: AutoRecordMode) {
         let detail: String?
         if mode == .off {
             detail = nil
@@ -438,9 +372,9 @@ final class AppController {
             case .notDetermined:
                 detail = "calendar · waiting for access"
             case .denied:
-                detail = "calendar · access denied (System Settings → Privacy & Security → Calendars)"
+                detail = "calendar · access denied (\(MeetingCalendar.settingsPath))"
             case .granted:
-                if let next = scheduler.upcoming(now: Date(), meetings: meetings) {
+                if let next = policy.upcoming(now: Date(), meetings: meetings) {
                     detail = "next · \(next.title) · \(Self.meetingTime(next.start))"
                 } else {
                     detail = "calendar · no upcoming meetings"
@@ -459,33 +393,21 @@ final class AppController {
         }
         if session != nil {
             indicator.update(indicatorSuppressed ? .hidden : .recording(warning: captureStatus.display != .healthy))
-        } else if let title = scheduler.prompting?.title ?? calls.prompting?.title {
-            indicator.update(.prompt(title: title))
+        } else if let prompt = policy.prompt {
+            indicator.update(.prompt(title: prompt.title))
         } else {
             indicator.update(.hidden)
         }
     }
 
-    /// The prompt was clicked: record the offered meeting, or else the
-    /// offered call.
     private func acceptPrompt() {
-        guard session == nil else { return }
-        if let meeting = scheduler.prompting {
-            scheduler.markHandled(meeting)
-            startSession(.meeting(meeting))
-        } else if let call = calls.prompting {
-            calls.markHandled(call)
-            startSession(.call(call))
-        }
+        guard session == nil, let origin = policy.acceptPrompt() else { return }
+        startSession(origin)
         updateIndicator()
     }
 
     private func skipPrompt() {
-        if let meeting = scheduler.prompting {
-            scheduler.markHandled(meeting)
-        } else if let call = calls.prompting {
-            calls.markHandled(call)
-        }
+        policy.skipPrompt()
         updateIndicator()
     }
 
@@ -495,7 +417,7 @@ final class AppController {
         if let session {
             let elapsed = Self.format(Date().timeIntervalSince(session.startedAt))
             let header = NSMenuItem(
-                title: "● \(origin.meeting?.title ?? "recording") · \(elapsed)", action: nil, keyEquivalent: "")
+                title: "● \(sessionTitle ?? "recording") · \(elapsed)", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
             menu.addItem(.separator())
@@ -518,12 +440,6 @@ final class AppController {
         NSWorkspace.shared.open(root)
     }
 
-    /// A detected call as a meeting record: no calendar, and both scheduled
-    /// times are when the call was detected.
-    nonisolated fileprivate static func meeting(for call: CallDetector.Call) -> Meeting {
-        Meeting(id: call.id, title: call.title, start: call.start, end: call.start, calendar: "", videoLink: nil)
-    }
-
     private static func metaMeeting(_ m: Meeting) -> SessionMeta.Meeting {
         let iso = ISO8601DateFormatter()
         return SessionMeta.Meeting(
@@ -535,15 +451,24 @@ final class AppController {
         )
     }
 
-    /// "10:30 AM" today, "Tue 10:30 AM" otherwise.
-    private static func meetingTime(_ date: Date) -> String {
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.timeStyle = .short
         f.dateStyle = .none
-        let time = f.string(from: date)
-        guard !Calendar.current.isDateInToday(date) else { return time }
+        return f
+    }()
+
+    private static let weekdayFormatter: DateFormatter = {
+        let f = DateFormatter()
         f.setLocalizedDateFormatFromTemplate("EEE")
-        return "\(f.string(from: date)) \(time)"
+        return f
+    }()
+
+    /// "10:30 AM" today, "Tue 10:30 AM" otherwise.
+    private static func meetingTime(_ date: Date) -> String {
+        let time = timeFormatter.string(from: date)
+        guard !Calendar.current.isDateInToday(date) else { return time }
+        return "\(weekdayFormatter.string(from: date)) \(time)"
     }
 
     private static func format(_ interval: TimeInterval) -> String {

@@ -69,11 +69,14 @@ final class CallDetectorTests: XCTestCase {
         XCTAssertNil(d.prompting)
     }
 
-    func testStoppedByHandNeverRestarts() {
-        var d = CallDetector(mode: .auto)
-        _ = d.decide(now: at(0), holding: ["Teams"], recording: .idle, meetingDue: false)
-        XCTAssertNotNil(d.decide(now: at(6), holding: ["Teams"], recording: .idle, meetingDue: false))
-        XCTAssertNil(d.decide(now: at(20), holding: ["Teams"], recording: .idle, meetingDue: false))
+    func testUserStopRetiresTheOngoingCall() {
+        var d = CallDetector(mode: .ask)
+        _ = d.decide(now: at(0), holding: ["Teams"], recording: .other, meetingDue: false)
+        _ = d.decide(now: at(6), holding: ["Teams"], recording: .other, meetingDue: false)
+        d.userStopped()
+        // Still on the call after stopping: no "Teams call detected" prompt.
+        _ = d.decide(now: at(8), holding: ["Teams"], recording: .idle, meetingDue: false)
+        XCTAssertNil(d.prompting)
     }
 
     func testCalendarMeetingOrOtherRecordingTakesPrecedence() {

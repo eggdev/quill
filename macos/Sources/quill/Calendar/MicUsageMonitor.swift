@@ -17,19 +17,24 @@ final class MicUsageMonitor {
 
     private let ownPID = getpid()
     private var watched = Set<AudioObjectID>()
-    private var listener: AudioObjectPropertyListenerBlock?
+    private var inputListener: AudioObjectPropertyListenerBlock?
+    private var changePending = false
 
     init() {
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        // Only a changed process list needs re-listing; an input flag
+        // flipping just needs a fresh look.
+        let listListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             MainActor.assumeIsolated {
                 self?.watchProcesses()
-                self?.onChange?()
+                self?.changed()
             }
         }
-        self.listener = listener
+        inputListener = { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.changed() }
+        }
         var address = Self.address(kAudioHardwarePropertyProcessObjectList)
         let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, .main, listener
+            AudioObjectID(kAudioObjectSystemObject), &address, .main, listListener
         )
         if status != noErr {
             FileHandle.standardError.write(
@@ -55,16 +60,29 @@ final class MicUsageMonitor {
 
     // MARK: -
 
+    /// Joining a call flips several processes' input flags at once; report
+    /// the burst as one change.
+    private func changed() {
+        guard !changePending else { return }
+        changePending = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                self?.changePending = false
+                self?.onChange?()
+            }
+        }
+    }
+
     /// Attach the input-flag listener to processes not seen before. Objects
     /// for exited processes disappear on their own; their listeners go with
     /// them, so the set is just pruned.
     private func watchProcesses() {
-        guard let listener else { return }
+        guard let inputListener else { return }
         let current = Set(Self.processObjects())
         watched.formIntersection(current)
         for process in current.subtracting(watched) {
             var address = Self.address(kAudioProcessPropertyIsRunningInput)
-            if AudioObjectAddPropertyListenerBlock(process, &address, .main, listener) == noErr {
+            if AudioObjectAddPropertyListenerBlock(process, &address, .main, inputListener) == noErr {
                 watched.insert(process)
             }
         }

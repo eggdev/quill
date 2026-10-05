@@ -62,15 +62,15 @@ enum Config {
     /// How calendar meetings drive recording: `off` (default), `ask` (show
     /// the floating indicator as a prompt when a meeting starts), or `auto`
     /// (start recording on its own). Unknown values read as off.
-    static func calendarMode() -> MeetingScheduler.Mode {
-        (calendar()?["mode"] as? String).flatMap(MeetingScheduler.Mode.init(rawValue:)) ?? .off
+    static func calendarMode() -> AutoRecordMode {
+        (calendar()?["mode"] as? String).flatMap(AutoRecordMode.init(rawValue:)) ?? .off
     }
 
     /// How calls without a calendar event (a meeting app holding the mic) are
     /// handled: `off`, `ask`, or `auto`. Defaults to `ask` whenever calendar
     /// meetings are on, and `off` otherwise.
-    static func adhocCallMode() -> CallDetector.Mode {
-        if let raw = calendar()?["adhoc_calls"] as? String, let mode = CallDetector.Mode(rawValue: raw) {
+    static func adhocCallMode() -> AutoRecordMode {
+        if let raw = calendar()?["adhoc_calls"] as? String, let mode = AutoRecordMode(rawValue: raw) {
             return mode
         }
         return calendarMode() == .off ? .off : .ask
@@ -102,7 +102,7 @@ enum Config {
     /// Persist a new calendar mode (the menu's Meetings submenu). Other keys
     /// survive; formatting and key order are normalized.
     /// A malformed file is left alone rather than replaced.
-    static func setCalendarMode(_ mode: MeetingScheduler.Mode) throws {
+    static func setCalendarMode(_ mode: AutoRecordMode) throws {
         let exists = FileManager.default.fileExists(atPath: path.path)
         guard var json = load() ?? (exists ? nil : [:]) else { throw ConfigError.malformed(path) }
         var c = json["calendar"] as? [String: Any] ?? [:]

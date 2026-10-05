@@ -12,6 +12,9 @@ final class MeetingCalendar {
         case notDetermined, granted, denied
     }
 
+    /// Where the user grants or revokes calendar access.
+    nonisolated static let settingsPath = "System Settings → Privacy & Security → Calendars"
+
     private let store = EKEventStore()
     private var changeObserver: NSObjectProtocol?
     private var lastSourceRefresh = Date.distantPast
@@ -46,11 +49,12 @@ final class MeetingCalendar {
         }
     }
 
-    /// Events overlapping [now - lookback, now + lookahead] as raw entries.
     /// The lookback catches meetings already under way when quill launches.
-    func entries(
-        now: Date = Date(), lookback: TimeInterval = 8 * 3600, lookahead: TimeInterval = 24 * 3600
-    ) -> [CalendarEntry] {
+    private static let lookback: TimeInterval = 8 * 3600
+    private static let lookahead: TimeInterval = 24 * 3600
+
+    /// Events overlapping [now - lookback, now + lookahead] as raw entries.
+    func entries(now: Date = Date()) -> [CalendarEntry] {
         guard Self.access() == .granted else { return [] }
         // Ask remote-backed sources (Exchange, CalDAV) to sync now and then
         // so a meeting added minutes ago is seen; EKEventStoreChanged fires
@@ -60,7 +64,8 @@ final class MeetingCalendar {
             lastSourceRefresh = now
         }
         let predicate = store.predicateForEvents(
-            withStart: now.addingTimeInterval(-lookback), end: now.addingTimeInterval(lookahead), calendars: nil
+            withStart: now.addingTimeInterval(-Self.lookback), end: now.addingTimeInterval(Self.lookahead),
+            calendars: nil
         )
         return store.events(matching: predicate).map(Self.entry)
     }

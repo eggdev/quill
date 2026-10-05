@@ -22,10 +22,10 @@ final class MenuBarController {
     private let transcriptionLabel: NSMenuItem
     private let calendarLabel: NSMenuItem
     private let toggleItem: NSMenuItem
-    private var modeItems: [MeetingScheduler.Mode: NSMenuItem] = [:]
+    private var modeItems: [AutoRecordMode: NSMenuItem] = [:]
 
     var onToggle: (() -> Void)?
-    var onModeChange: ((MeetingScheduler.Mode) -> Void)?
+    var onModeChange: ((AutoRecordMode) -> Void)?
     var onOpenFolder: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -73,14 +73,13 @@ final class MenuBarController {
         let meetings = NSMenuItem(title: "Calendar meetings", action: nil, keyEquivalent: "")
         let meetingsMenu = NSMenu()
         meetingsMenu.autoenablesItems = false
-        let modeTitles: [(MeetingScheduler.Mode, String)] = [
+        let modeTitles: [(AutoRecordMode, String)] = [
             (.off, "Off"),
             (.ask, "Ask when a meeting starts"),
             (.auto, "Record automatically"),
         ]
         for (mode, title) in modeTitles {
-            let item = NSMenuItem(title: title, action: #selector(modeClicked(_:)), keyEquivalent: "")
-            item.representedObject = mode.rawValue
+            let item = ActionMenuItem(title) { [weak self] in self?.onModeChange?(mode) }
             meetingsMenu.addItem(item)
             modeItems[mode] = item
         }
@@ -96,7 +95,7 @@ final class MenuBarController {
         )
         menu.addItem(quit)
 
-        for item in [toggleItem, openFolder, quit] + Array(modeItems.values) {
+        for item in [toggleItem, openFolder, quit] {
             item.target = self
         }
 
@@ -153,7 +152,7 @@ final class MenuBarController {
 
     /// Reflect the calendar mode (checkmark in the submenu) and a status line
     /// such as the next meeting or missing access; nil hides the line.
-    func updateCalendar(mode: MeetingScheduler.Mode, detail: String?) {
+    func updateCalendar(mode: AutoRecordMode, detail: String?) {
         for (m, item) in modeItems {
             item.state = m == mode ? .on : .off
         }
@@ -187,10 +186,4 @@ final class MenuBarController {
     @objc private func toggleClicked() { onToggle?() }
     @objc private func openFolderClicked() { onOpenFolder?() }
     @objc private func quitClicked() { onQuit?() }
-    @objc private func modeClicked(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let mode = MeetingScheduler.Mode(rawValue: raw) else {
-            return
-        }
-        onModeChange?(mode)
-    }
 }

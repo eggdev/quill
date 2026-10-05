@@ -147,42 +147,48 @@ final class SegmentFile: @unchecked Sendable {
         )
     }
 
-    /// Buffer RMS across all channels for the level meter and activity
+    /// Buffer RMS (loudest channel) for the level meter and activity
     /// detection. vDSP keeps it allocation-free on the real-time thread.
-    private static func rms(_ buffer: AVAudioPCMBuffer) -> Float {
-        guard let channels = buffer.floatChannelData else { return 0 }
-        let frames = Int(buffer.frameLength)
-        let planes = buffer.format.isInterleaved ? 1 : Int(buffer.format.channelCount)
-        let samplesPerPlane =
-            buffer.format.isInterleaved
-            ? frames * Int(buffer.format.channelCount)
-            : frames
-        guard samplesPerPlane > 0 else { return 0 }
+    static func rms(_ buffer: AVAudioPCMBuffer) -> Float {
         var loudest: Float = 0
-        for plane in 0..<planes {
+        forEachPlane(of: buffer) { samples, count in
             var value: Float = 0
-            vDSP_rmsqv(channels[plane], 1, &value, vDSP_Length(samplesPerPlane))
+            vDSP_rmsqv(samples, 1, &value, vDSP_Length(count))
             loudest = max(loudest, value)
+            return true
         }
         return loudest
     }
 
     /// Exact-zero check for the silence diagnostic. Early-exits on the first
     /// non-zero sample, so voiced audio costs almost nothing.
-    private static func isAllZero(_ buffer: AVAudioPCMBuffer) -> Bool {
-        guard let channels = buffer.floatChannelData else { return false }
-        let frames = Int(buffer.frameLength)
-        // Interleaved buffers expose one pointer covering every channel.
-        let planes = buffer.format.isInterleaved ? 1 : Int(buffer.format.channelCount)
-        let samplesPerPlane =
-            buffer.format.isInterleaved
-            ? frames * Int(buffer.format.channelCount)
-            : frames
-        for plane in 0..<planes {
-            let data = channels[plane]
-            for i in 0..<samplesPerPlane where data[i] != 0 {
+    static func isAllZero(_ buffer: AVAudioPCMBuffer) -> Bool {
+        var allZero = true
+        let readable = forEachPlane(of: buffer) { samples, count in
+            for i in 0..<count where samples[i] != 0 {
+                allZero = false
                 return false
             }
+            return true
+        }
+        return readable && allZero
+    }
+
+    /// Visit each sample plane — one pointer covering every channel for an
+    /// interleaved buffer, one per channel otherwise — until `body` returns
+    /// false. Non-escaping, so nothing allocates on the real-time thread.
+    /// Returns false when the buffer has no float samples to visit.
+    @discardableResult
+    private static func forEachPlane(
+        of buffer: AVAudioPCMBuffer, _ body: (UnsafePointer<Float>, Int) -> Bool
+    ) -> Bool {
+        guard let channels = buffer.floatChannelData else { return false }
+        let frames = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        let interleaved = buffer.format.isInterleaved
+        let count = interleaved ? frames * channelCount : frames
+        for plane in 0..<(interleaved ? 1 : channelCount) where count > 0 {
+            if !body(channels[plane], count) { break }
         }
         return true
     }

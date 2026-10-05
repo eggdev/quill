@@ -134,10 +134,13 @@ final class RecordingIndicator {
 
     private func pollLevels() {
         let raw = levelSource?() ?? [:]
-        pill.levels = (
-            Self.smooth(pill.levels.mic, toward: Self.normalized(raw[.mic] ?? 0)),
-            Self.smooth(pill.levels.system, toward: Self.normalized(raw[.system] ?? 0))
+        let next = (
+            mic: Self.smooth(pill.levels.mic, toward: Self.normalized(raw[.mic] ?? 0)),
+            system: Self.smooth(pill.levels.system, toward: Self.normalized(raw[.system] ?? 0))
         )
+        // A settled meter (silence, steady tone) needs no redraw.
+        guard abs(next.mic - pill.levels.mic) > 0.005 || abs(next.system - pill.levels.system) > 0.005 else { return }
+        pill.levels = next
         pill.needsDisplay = true
     }
 
@@ -173,6 +176,36 @@ final class RecordingIndicator {
     }
 }
 
+/// The dark capsule look shared by the recording indicator and the prompt.
+@MainActor
+private enum Capsule {
+    static let featherColor = NSColor(white: 0.82, alpha: 1)
+
+    /// The feather, tinted once — custom views don't get the automatic
+    /// tinting template images get in controls, and re-tinting per frame
+    /// would re-rasterize the SVG 30 times a second.
+    static func feather(side: CGFloat) -> NSImage? {
+        MenuBarController.featherImage(size: NSSize(width: side, height: side))?.tinted(featherColor)
+    }
+
+    /// Fill and outline a capsule inset 1 pt inside `rect`.
+    static func fill(_ rect: NSRect) {
+        let bounds = rect.insetBy(dx: 1, dy: 1)
+        let radius = min(bounds.width, bounds.height) / 2
+        let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
+        NSColor(white: 0.12, alpha: 0.96).setFill()
+        path.fill()
+        NSColor(white: 0.32, alpha: 1).setStroke()
+        path.lineWidth = 1.5
+        path.stroke()
+    }
+
+    /// Draw an image upright in a flipped view.
+    static func draw(_ image: NSImage?, in rect: NSRect) {
+        image?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+    }
+}
+
 /// The ask-mode prompt: feather, a record dot, "Record “title”?", and a ✕.
 /// Clicking anywhere but the ✕ records.
 private final class PromptView: NSView {
@@ -183,7 +216,7 @@ private final class PromptView: NSView {
     private static let height: CGFloat = 40
     private static let maxTextWidth: CGFloat = 260
     private static let closeWidth: CGFloat = 34
-    private let feather = MenuBarController.featherImage(size: NSSize(width: 16, height: 16))
+    private let feather = Capsule.feather(side: 16)
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -209,34 +242,22 @@ private final class PromptView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let bounds = self.bounds.insetBy(dx: 1, dy: 1)
-        let radius = bounds.height / 2
-        let capsule = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
-        NSColor(white: 0.12, alpha: 0.96).setFill()
-        capsule.fill()
-        NSColor(white: 0.32, alpha: 1).setStroke()
-        capsule.lineWidth = 1.5
-        capsule.stroke()
-
+        Capsule.fill(bounds)
         var x: CGFloat = 14
-        if let feather {
-            feather.tinted(NSColor(white: 0.82, alpha: 1)).draw(
-                in: NSRect(x: x, y: (self.bounds.height - 16) / 2, width: 16, height: 16),
-                from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-        }
+        Capsule.draw(feather, in: NSRect(x: x, y: (bounds.height - 16) / 2, width: 16, height: 16))
         x += 16 + 10
         NSColor.systemRed.setFill()
-        NSBezierPath(ovalIn: NSRect(x: x, y: self.bounds.midY - 4, width: 8, height: 8)).fill()
+        NSBezierPath(ovalIn: NSRect(x: x, y: bounds.midY - 4, width: 8, height: 8)).fill()
         x += 8 + 8
 
         let lineHeight = ceil(text.size().height)
         text.draw(
-            with: NSRect(x: x, y: (self.bounds.height - lineHeight) / 2, width: textWidth, height: lineHeight),
+            with: NSRect(x: x, y: (bounds.height - lineHeight) / 2, width: textWidth, height: lineHeight),
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine]
         )
 
         // ✕ in a faint circle.
-        let close = NSRect(x: self.bounds.maxX - Self.closeWidth + 6, y: self.bounds.midY - 10, width: 20, height: 20)
+        let close = NSRect(x: bounds.maxX - Self.closeWidth + 6, y: bounds.midY - 10, width: 20, height: 20)
         NSColor(white: 1, alpha: 0.1).setFill()
         NSBezierPath(ovalIn: close).fill()
         let cross = NSBezierPath()
@@ -274,7 +295,7 @@ private final class IndicatorView: NSView {
 
     private var dragStart: (mouse: NSPoint, origin: NSPoint)?
     private var dragged = false
-    private let feather = MenuBarController.featherImage(size: NSSize(width: 18, height: 18))
+    private let feather = Capsule.feather(side: 18)
 
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -282,18 +303,8 @@ private final class IndicatorView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let bounds = self.bounds.insetBy(dx: 1, dy: 1)
-        let capsule = NSBezierPath(roundedRect: bounds, xRadius: bounds.width / 2, yRadius: bounds.width / 2)
-        NSColor(white: 0.12, alpha: 0.96).setFill()
-        capsule.fill()
-        NSColor(white: 0.32, alpha: 1).setStroke()
-        capsule.lineWidth = 1.5
-        capsule.stroke()
-
-        if let feather {
-            let rect = NSRect(x: (bounds.width - 18) / 2 + 1, y: 12, width: 18, height: 18)
-            feather.tinted(NSColor(white: 0.82, alpha: 1))
-                .draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-        }
+        Capsule.fill(self.bounds)
+        Capsule.draw(feather, in: NSRect(x: (self.bounds.width - 18) / 2, y: 12, width: 18, height: 18))
 
         let centerY = bounds.height * 0.72
         (warning ? NSColor.systemOrange : NSColor.systemGreen).setFill()

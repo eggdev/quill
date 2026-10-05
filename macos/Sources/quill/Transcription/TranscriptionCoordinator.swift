@@ -80,8 +80,9 @@ actor TranscriptionCoordinator {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             do {
-                try await transcribe(dir)
-                let name = SessionMeta.meeting(in: dir)?.title ?? dir.lastPathComponent
+                let meeting = SessionMeta.meeting(in: dir)
+                try await transcribe(dir, meeting: meeting)
+                let name = meeting?.title ?? dir.lastPathComponent
                 notifyUser(title: "quill — transcript ready", body: name)
                 runHook(for: dir)
             } catch {
@@ -102,7 +103,7 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
-    private func transcribe(_ dir: URL) async throws {
+    private func transcribe(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
         // Both metadata schemas normalize to ordered (file, speaker, offset)
         // inputs — one per segment under v2, one per track under v1. Each
         // segment transcribes independently and shifts onto the session
@@ -137,7 +138,7 @@ actor TranscriptionCoordinator {
             created_at: ISO8601DateFormatter().string(from: Date()),
             segments: merged
         )
-        try transcript.write(to: dir, captureStatus: captureStatus, meeting: SessionMeta.meeting(in: dir))
+        try transcript.write(to: dir, captureStatus: captureStatus, meeting: meeting)
         log(dir, "done — \(merged.count) segments")
     }
 
