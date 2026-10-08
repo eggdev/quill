@@ -129,6 +129,14 @@ struct TelemetrySnapshot: Equatable, Sendable {
     var framesWritten: Int64 = 0
     var zeroRunMs: Int = 0
     var lastError: String?
+    /// RMS of the latest buffer (linear, 0...1), for the level meter.
+    var level: Float = 0
+    /// When the latest buffer louder than `activityThreshold` was written.
+    var lastActiveMs: Int?
+
+    /// RMS above which a buffer counts as someone speaking or audio playing
+    /// (about -45 dBFS) — above typical room tone, well below speech.
+    static let activityThreshold: Float = 0.0056
 }
 
 /// Lock-protected store the real-time audio callbacks update and the
@@ -140,9 +148,11 @@ final class TrackTelemetry: @unchecked Sendable {
 
     /// Record one successfully written buffer. `allZero` feeds the silence
     /// diagnostic; it never affects transport health.
-    func recordWrite(nowMs: Int, bufferEndMs: Int, frames: Int, durationMs: Int, allZero: Bool) {
+    func recordWrite(nowMs: Int, bufferEndMs: Int, frames: Int, durationMs: Int, allZero: Bool, level: Float = 0) {
         lock.lock()
         defer { lock.unlock() }
+        state.level = level
+        if level >= TelemetrySnapshot.activityThreshold { state.lastActiveMs = nowMs }
         if state.firstWriteMs == nil { state.firstWriteMs = nowMs }
         state.lastWriteMs = nowMs
         state.lastBufferEndMs = max(state.lastBufferEndMs ?? 0, bufferEndMs)

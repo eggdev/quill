@@ -20,6 +20,8 @@ Requires macOS 15+. Apple Silicon is recommended for transcription speed.
 2. Choose **Stop recording** when the meeting ends. Transcription starts automatically.
 3. The transcript lands in `~/Recordings/<yyyy.MM.dd-HHmm>/transcript.md`, next to the audio.
 
+To record meetings from your calendar, choose **Calendar meetings → Record automatically** (or **Ask when a meeting starts**) in the menu. A floating feather with live level bars stays on screen while quill records; click it to stop.
+
 See the [macOS documentation](macos/README.md) for configuration, the CLI, and troubleshooting.
 
 ## 3. Platforms

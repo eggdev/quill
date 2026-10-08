@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Added calendar-driven recording on macOS: quill reads meetings from macOS
+  Calendar through EventKit and either starts recording when a meeting with a
+  video link begins (`auto`) or offers to (`ask`). Meeting recordings stop
+  once the call goes quiet after its scheduled end, hand over to a
+  back-to-back meeting, and never restart after being stopped by hand.
+- Added a floating recording indicator: a draggable capsule with live mic and
+  system-audio level bars, visible across Spaces and full-screen apps and
+  excluded from screen sharing. Clicking it stops the recording. In ask mode
+  it becomes a labeled "Record “…”?" prompt with a ✕ to skip, which expires
+  after 10 minutes unanswered.
+- Added ad-hoc call detection: when Zoom, Teams, Webex, Slack, or FaceTime
+  holds the microphone with no calendar meeting due, quill offers to record
+  the call (or records it, with `calendar.adhoc_calls: "auto"`) and stops 30 s
+  after the app releases the mic. The same signal now ends calendar-meeting
+  recordings as soon as the call does.
+- Recorded the calendar meeting in `meta.json` (optional `meeting` field) and
+  used its title for the transcript and notifications.
+
 ## 0.1.3 - 2026-08-04
 
 - Fixed macOS route changes silently truncating capture: both tracks now have

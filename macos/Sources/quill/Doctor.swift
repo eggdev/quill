@@ -21,6 +21,7 @@ enum DoctorReport {
             checkSystemAudio(),
             checkRecordingsRoot(recordingsRoot),
             checkTranscription(),
+            checkCalendar(),
         ]
     }
 
@@ -95,6 +96,31 @@ enum DoctorReport {
             status: .warn("parakeet models not downloaded (~600 MB)"),
             remediation: "downloads automatically on first transcription — record a short test session while online"
         )
+    }
+
+    /// Calendar access only matters once meeting recording is turned on, and
+    /// a missing grant never blocks manual recording — so never a hard fail.
+    static func checkCalendar() -> Check {
+        let mode = Config.calendarMode()
+        guard mode != .off else {
+            return Check(name: "calendar", status: .warn("meeting recording off"), remediation: nil)
+        }
+        switch MeetingCalendar.access() {
+        case .granted:
+            return Check(name: "calendar", status: .ok, remediation: nil)
+        case .notDetermined:
+            return Check(
+                name: "calendar",
+                status: .warn("not yet requested — will prompt when quill starts"),
+                remediation: "run quill; macOS will ask for calendar access"
+            )
+        case .denied:
+            return Check(
+                name: "calendar",
+                status: .warn("access denied — meetings won't be \(mode == .auto ? "recorded" : "offered")"),
+                remediation: "\(MeetingCalendar.settingsPath) → enable full access for quill (or your terminal)"
+            )
+        }
     }
 
     static func print(_ checks: [Check]) {

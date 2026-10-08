@@ -80,8 +80,10 @@ actor TranscriptionCoordinator {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             do {
-                try await transcribe(dir)
-                notifyUser(title: "quill — transcript ready", body: dir.lastPathComponent)
+                let meeting = SessionMeta.meeting(in: dir)
+                try await transcribe(dir, meeting: meeting)
+                let name = meeting?.title ?? dir.lastPathComponent
+                notifyUser(title: "quill — transcript ready", body: name)
                 runHook(for: dir)
             } catch {
                 log(dir, "transcription failed: \(error)")
@@ -101,7 +103,7 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
-    private func transcribe(_ dir: URL) async throws {
+    private func transcribe(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
         // Both metadata schemas normalize to ordered (file, speaker, offset)
         // inputs — one per segment under v2, one per track under v1. Each
         // segment transcribes independently and shifts onto the session
@@ -136,7 +138,7 @@ actor TranscriptionCoordinator {
             created_at: ISO8601DateFormatter().string(from: Date()),
             segments: merged
         )
-        try transcript.write(to: dir, captureStatus: captureStatus)
+        try transcript.write(to: dir, captureStatus: captureStatus, meeting: meeting)
         log(dir, "done — \(merged.count) segments")
     }
 
@@ -224,18 +226,23 @@ struct Transcript: Codable {
     /// disk — resumePending treats presence of transcript.json as "done".
     /// `captureStatus` (v2 sessions only) is persisted in the readable header
     /// so an incomplete recording stays visibly incomplete after the
-    /// transient notification disappears.
-    func write(to dir: URL, captureStatus: TrackStatus? = nil) throws {
+    /// transient notification disappears. A calendar `meeting` titles the
+    /// readable transcript; the folder name stays on its own line.
+    func write(to dir: URL, captureStatus: TrackStatus? = nil, meeting: SessionMeta.Meeting? = nil) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(self)
             .write(to: dir.appendingPathComponent("transcript.json"), options: .atomic)
-        try Data(rendered(title: dir.lastPathComponent, captureStatus: captureStatus).utf8)
+        let title = meeting?.title ?? dir.lastPathComponent
+        let session = meeting == nil ? nil : dir.lastPathComponent
+        try Data(rendered(title: title, session: session, captureStatus: captureStatus).utf8)
             .write(to: dir.appendingPathComponent("transcript.md"), options: .atomic)
     }
 
-    func rendered(title: String, captureStatus: TrackStatus? = nil) -> String {
-        var lines = ["# \(title)", "", "engine: \(engine) (\(model))"]
+    func rendered(title: String, session: String? = nil, captureStatus: TrackStatus? = nil) -> String {
+        var lines = ["# \(title)", ""]
+        if let session { lines.append("session: \(session)") }
+        lines.append("engine: \(engine) (\(model))")
         if let captureStatus, captureStatus != .complete {
             lines.append("capture: \(captureStatus.rawValue)")
         }

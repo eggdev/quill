@@ -20,9 +20,12 @@ final class MenuBarController {
     private let stateLabel: NSMenuItem
     private let warningLabel: NSMenuItem
     private let transcriptionLabel: NSMenuItem
+    private let calendarLabel: NSMenuItem
     private let toggleItem: NSMenuItem
+    private var modeItems: [AutoRecordMode: NSMenuItem] = [:]
 
     var onToggle: (() -> Void)?
+    var onModeChange: ((AutoRecordMode) -> Void)?
     var onOpenFolder: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -46,6 +49,11 @@ final class MenuBarController {
         transcriptionLabel.isHidden = true
         menu.addItem(transcriptionLabel)
 
+        calendarLabel = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        calendarLabel.isEnabled = false
+        calendarLabel.isHidden = true
+        menu.addItem(calendarLabel)
+
         menu.addItem(.separator())
 
         toggleItem = NSMenuItem(
@@ -61,6 +69,22 @@ final class MenuBarController {
             keyEquivalent: "o"
         )
         menu.addItem(openFolder)
+
+        let meetings = NSMenuItem(title: "Calendar meetings", action: nil, keyEquivalent: "")
+        let meetingsMenu = NSMenu()
+        meetingsMenu.autoenablesItems = false
+        let modeTitles: [(AutoRecordMode, String)] = [
+            (.off, "Off"),
+            (.ask, "Ask when a meeting starts"),
+            (.auto, "Record automatically"),
+        ]
+        for (mode, title) in modeTitles {
+            let item = ActionMenuItem(title) { [weak self] in self?.onModeChange?(mode) }
+            meetingsMenu.addItem(item)
+            modeItems[mode] = item
+        }
+        meetings.submenu = meetingsMenu
+        menu.addItem(meetings)
 
         menu.addItem(.separator())
 
@@ -92,14 +116,16 @@ final class MenuBarController {
     /// `signalWarning` is a secondary diagnostic (exact digital silence on a
     /// track that is still delivering callbacks) — its own line, never the
     /// same visual state as stopped callbacks.
-    func update(_ display: Display, signalWarning: Bool = false) {
+    /// `meetingTitle` replaces "recording" in the healthy state line when the
+    /// session belongs to a calendar meeting.
+    func update(_ display: Display, signalWarning: Bool = false, meetingTitle: String? = nil) {
         switch display {
         case .idle:
             stateLabel.title = "idle"
             toggleItem.title = "Start recording"
             statusItem.button?.contentTintColor = nil
         case .recording(let elapsed):
-            stateLabel.title = "● recording · \(elapsed)"
+            stateLabel.title = "● \(meetingTitle ?? "recording") · \(elapsed)"
             toggleItem.title = "Stop recording"
             statusItem.button?.contentTintColor = .systemRed
         case .recovering(let track, let elapsed):
@@ -124,6 +150,16 @@ final class MenuBarController {
         transcriptionLabel.isHidden = text == nil
     }
 
+    /// Reflect the calendar mode (checkmark in the submenu) and a status line
+    /// such as the next meeting or missing access; nil hides the line.
+    func updateCalendar(mode: AutoRecordMode, detail: String?) {
+        for (m, item) in modeItems {
+            item.state = m == mode ? .on : .off
+        }
+        calendarLabel.title = detail ?? ""
+        calendarLabel.isHidden = detail == nil
+    }
+
     // Inlined Lucide feather SVG. Keeping it in source means the executable
     // has no separate resource bundle to install alongside it — true
     // single-binary.
@@ -137,12 +173,13 @@ final class MenuBarController {
         </svg>
         """
 
-    private static func featherImage() -> NSImage? {
+    /// Menu-bar status icons are nominally 18pt tall; the default size
+    /// matches. The floating indicator draws a larger copy.
+    static func featherImage(size: NSSize = NSSize(width: 16, height: 16)) -> NSImage? {
         guard let data = featherSVG.data(using: .utf8),
             let image = NSImage(data: data)
         else { return nil }
-        // Menu-bar status icons are nominally 18pt tall; size the SVG to match.
-        image.size = NSSize(width: 16, height: 16)
+        image.size = size
         return image
     }
 

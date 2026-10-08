@@ -39,6 +39,84 @@ transcription speed.
    automatically (the menu shows progress); a notification fires when the
    transcript is ready.
 
+While recording, a floating feather capsule sits at the right edge of the
+screen with three live level bars — left is your mic, right is the call's
+audio, center is whichever is louder. Flat bars on one side mean that side
+isn't being heard. Drag it anywhere (the position is remembered); click it to
+stop recording or hide it until the next recording. It stays above full-screen
+calls and is excluded from screen sharing, so other participants never see
+it. Set `"floating_indicator": false` to turn it off.
+
+## Calendar meetings
+
+quill can start recording on its own when a meeting begins. Choose
+**Calendar meetings** in the menu:
+
+- **Off** (default) — record only when you click.
+- **Ask when a meeting starts** — a floating prompt reading *Record
+  “Weekly sync”?* appears, with a notification. Click it to record, or ✕ to
+  skip. An unanswered prompt goes away after 10 minutes.
+- **Record automatically** — recording starts a minute before the meeting,
+  with a notification and the floating indicator.
+
+The first time either is chosen, macOS asks for calendar access. quill reads
+the calendars already set up in macOS Calendar — iCloud, Google, and
+Exchange / Microsoft 365 (add the account under System Settings → Internet
+Accounts). Everything is read from the local calendar database; nothing is
+sent anywhere.
+
+Which events count: timed events with a video-call link (Zoom, Teams, Google
+Meet, Webex, and similar) in the URL, location, or notes, that you haven't
+declined. All-day, canceled, and 8 h+ events are skipped, and an invite that
+appears on two calendars is recorded once. Set `require_video_link: false` to
+include in-person meetings too.
+
+When a meeting recording stops:
+
+- after the scheduled end, once both tracks have been quiet for 2 minutes
+  (`stop_after_quiet_seconds`) — a meeting that runs over keeps recording;
+- after 10 minutes with no audio at all, at any point;
+- an hour past the scheduled end, regardless;
+- 30 seconds after the meeting app (Teams, Zoom, …) lets go of the
+  microphone, if it held it during the recording — usually the moment you
+  leave the call, even before the scheduled end;
+- at the start of a back-to-back meeting, which gets its own session (in ask
+  mode, quill stops and prompts for the next one).
+
+A meeting triggers once: stop it by hand and neither it nor anything else
+under way at that moment is offered or started again. Recordings you
+start yourself are never stopped automatically — if one overlaps a meeting it
+still takes the meeting's title. The meeting is recorded in `meta.json`
+(`meeting`) and titles `transcript.md` and the notifications.
+
+### Calls without a calendar event
+
+With calendar meetings on, quill also notices ad-hoc calls: when Zoom,
+Teams, Webex, Slack, or FaceTime has held the microphone for 5 seconds, the
+same floating prompt appears (*Record “Teams call”?*) with a notification
+("Teams call detected") — click it to record, or ✕ to skip. The
+recording is titled "Teams call" and stops 30 seconds after the app releases
+the mic (a brief drop or device switch doesn't end it). If a calendar meeting
+comes due while an ad-hoc call is being recorded, the recording takes the
+meeting's title and stop rules.
+
+Ad-hoc calls always ask by default, even in **Record automatically** mode;
+set `calendar.adhoc_calls` to `auto` to record them without asking, or `off`
+to ignore them. No prompt appears while anything is recording or while a
+calendar meeting is in its window — the call is that meeting.
+
+Browser calls (Meet, Teams on the web) are off by default, since browsers
+hold the mic for plenty besides calls; `calendar.browser_calls: true` turns
+on Chrome, Arc, Edge, Brave, and Firefox. Safari can't be detected — its
+audio runs in a shared WebKit process that isn't attributable to Safari.
+
+Detection reads Core Audio's per-process input state, which needs no
+permission and sees only which apps are using the mic, never their audio.
+
+Recording laws differ by state and country, and some require every
+participant's consent. Auto-recording doesn't change your obligation to tell
+people a call is being recorded.
+
 Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 
 | File | Contents |
@@ -46,7 +124,7 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 | `mic.caf` | your side (default input device, AAC) |
 | `system.caf` | everything the Mac played — the other side of the call (AAC) |
 | `mic-002.caf`, `system-002.caf`, … | additional segments, present only if capture had to restart mid-session (see below) |
-| `meta.json` | start/end timestamps, duration, per-track segments/offsets, and capture status (`complete`/`recovered`/`incomplete`) |
+| `meta.json` | start/end timestamps, duration, per-track segments/offsets, capture status (`complete`/`recovered`/`incomplete`), and the calendar `meeting` if there was one |
 | `transcript.json` | canonical transcript — engine provenance + timed, speaker-tagged segments |
 | `transcript.md` | the same transcript rendered for reading |
 | `transcribe.log` | transcription progress/errors for this session |
@@ -115,7 +193,17 @@ Optional, at `~/.config/quill/config.json`:
 {
   "recordings_dir": "~/Recordings",
   "transcription": { "enabled": true, "engine": "parakeet" },
-  "on_stop": "my-hook"
+  "on_stop": "my-hook",
+  "calendar": {
+    "mode": "auto",
+    "require_video_link": true,
+    "ignore_calendars": ["Birthdays", "Holidays"],
+    "lead_seconds": 60,
+    "stop_after_quiet_seconds": 120,
+    "adhoc_calls": "ask",
+    "browser_calls": false
+  },
+  "floating_indicator": true
 }
 ```
 
@@ -132,13 +220,29 @@ Optional, at `~/.config/quill/config.json`:
   argument, **after the transcript is written** (or right after recording if
   transcription is disabled). Wire it to whatever comes next: summarization,
   filing, indexing.
+- `calendar.mode` — `off` (default), `ask`, or `auto`; the menu's **Calendar
+  meetings** submenu writes this key. See [Calendar meetings](#calendar-meetings).
+- `calendar.require_video_link` — only events with a video-call link count as
+  meetings (default `true`).
+- `calendar.ignore_calendars` — calendar names never to record from.
+- `calendar.lead_seconds` — how early auto-recording starts (default 60).
+- `calendar.stop_after_quiet_seconds` — after a meeting's scheduled end, stop
+  once both tracks have been quiet this long (default 120).
+- `calendar.adhoc_calls` — calls without a calendar event: `off`, `ask`, or
+  `auto`. Defaults to `ask` while `calendar.mode` is on, `off` otherwise.
+- `calendar.browser_calls` — count a browser holding the mic as a call
+  (default `false`).
+- `floating_indicator` — show the floating recording indicator (default
+  `true`).
+
+Config changes apply within a few seconds; no restart needed.
 
 ## CLI
 
 ```sh
 quill                        # run the menu-bar daemon (^C to quit)
 quill run --out <dir>        # custom recordings root (default ~/Recordings)
-quill doctor                 # check permissions, recordings folder, models
+quill doctor                 # check permissions, recordings folder, models, calendar
 quill install --launch-at-login
 quill install --uninstall
 ```
@@ -151,7 +255,11 @@ quill install --uninstall
 - **AVAudioEngine** — mic capture
 - **AVAudioFile** — streaming AAC encode into CAF
 - **FluidAudio / Parakeet** — on-device Core ML transcription
-- **NSStatusItem** — the whole UI
+- **EventKit** — calendar meetings, read from the local calendar database
+- **Core Audio process objects** (`kAudioHardwarePropertyProcessObjectList`,
+  `kAudioProcessPropertyIsRunningInput`) — which meeting apps hold the mic
+- **NSStatusItem + a non-activating NSPanel** — the menu bar and the floating
+  indicator
 
 ## Gotchas
 
@@ -160,6 +268,13 @@ quill install --uninstall
   per-process picker if it bothers you).
 - If recordings come out silent, check System Settings → Privacy & Security →
   Screen & System Audio Recording.
+- If calendar meetings never start, check System Settings → Privacy &
+  Security → Calendars (quill needs **Full Access** — video links live in
+  event notes) and that the account shows up in the Calendar app. `quill
+  doctor` reports the access state.
+- When quill runs from a terminal, macOS attributes microphone and calendar
+  permissions to the terminal app rather than quill; the LaunchAgent gets its
+  own.
 - Parakeet v2 is English-only. Other languages will come with the Whisper
   engine.
 - The binary embeds its Info.plist (`__TEXT,__info_plist`) so TCC can
