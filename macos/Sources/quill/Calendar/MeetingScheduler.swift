@@ -183,14 +183,10 @@ struct MeetingScheduler: Sendable {
     mutating func decide(
         now: Date, meetings: [Meeting], recording: Recording, quiet: TimeInterval, callEnded: Bool = false
     ) -> Action? {
-        guard mode != .off else {
-            prompt.clear()
-            return nil
-        }
         guard case .meeting(let current) = recording else {
             // Idle or a hand-started recording: only an idle app starts or
-            // offers anything.
-            guard recording == .idle, let due = dueMeeting(now: now, meetings: meetings) else {
+            // offers anything, and only while meetings are on.
+            guard mode != .off, recording == .idle, let due = dueMeeting(now: now, meetings: meetings) else {
                 prompt.clear()
                 return nil
             }
@@ -204,10 +200,15 @@ struct MeetingScheduler: Sendable {
             return .start(due)
         }
         prompt.clear()
+        // A meeting recording keeps its stop rules even if meetings were
+        // turned off after it started: the mode decides what starts, never
+        // what a running recording does.
+        //
         // Back-to-back meetings: hand over once the current one is past
         // its scheduled end and the next has begun. An overlapping
-        // meeting never interrupts one still in its slot.
-        if now >= current.end,
+        // meeting never interrupts one still in its slot. With meetings
+        // off, nothing is handed over to.
+        if mode != .off, now >= current.end,
             let next = meetings.last(where: {
                 $0.key != current.key && !isHandled($0) && $0.start <= now && now < $0.end
             })

@@ -78,11 +78,26 @@ final class MeetingSchedulerTests: XCTestCase {
         XCTAssertEqual(s.decide(now: at(25), meetings: [m], recording: .idle, quiet: 0), .start(m))
     }
 
-    func testOffDoesNothing() {
+    func testOffStartsAndOffersNothing() {
         var s = MeetingScheduler(mode: .off)
         let m = meeting("a", 0, 30)
         XCTAssertNil(s.decide(now: at(5), meetings: [m], recording: .idle, quiet: 0))
-        XCTAssertNil(s.decide(now: at(40), meetings: [m], recording: .meeting(m), quiet: 999))
+        XCTAssertNil(s.prompting)
+    }
+
+    func testTurningOffMidRecordingKeepsItsStopRules() {
+        var s = MeetingScheduler(mode: .auto)
+        let a = meeting("a", 0, 30)
+        let b = meeting("b", 30, 60)
+        XCTAssertEqual(s.decide(now: at(0), meetings: [a, b], recording: .idle, quiet: 0), .start(a))
+        s.mode = .off
+        // Switching off doesn't stop it, and neither does a pause mid-meeting.
+        XCTAssertNil(s.decide(now: at(10), meetings: [a, b], recording: .meeting(a), quiet: 0))
+        XCTAssertNil(s.decide(now: at(20), meetings: [a, b], recording: .meeting(a), quiet: 300))
+        // No hand-over to the next meeting while off; still talking past the end.
+        XCTAssertNil(s.decide(now: at(32), meetings: [a, b], recording: .meeting(a), quiet: 10))
+        // The meeting is over and quiet: it stops as it would have.
+        XCTAssertEqual(s.decide(now: at(32), meetings: [a, b], recording: .meeting(a), quiet: 120), .stop(.ended))
     }
 
     func testAskPromptsUntilHandledOrOver() {

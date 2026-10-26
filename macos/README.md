@@ -84,7 +84,9 @@ When a meeting recording stops:
   mode, quill stops and prompts for the next one).
 
 A meeting triggers once: stop it by hand and neither it nor anything else
-under way at that moment is offered or started again. Recordings you
+under way at that moment is offered or started again. Changing the
+**Calendar meetings** setting never stops a recording under way; it keeps
+the stop rules above, minus the hand-over to a next meeting. Recordings you
 start yourself are never stopped automatically — if one overlaps a meeting it
 still takes the meeting's title. The meeting is recorded in `meta.json`
 (`meeting`) and titles `transcript.md` and the notifications.
