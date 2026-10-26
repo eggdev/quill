@@ -137,6 +137,23 @@ speaker-identification model. CAF on purpose: unlike m4a, it needs no
 finalization pass — if the process dies mid-meeting, everything already
 written is still readable.
 
+## iPhone recordings
+
+Recordings made with [Quill for iPhone](../ios/README.md) arrive through
+iCloud Drive. quill checks the iPhone app's iCloud folder every 30 seconds,
+moves each finished recording into the recordings folder as
+`<yyyy.MM.dd-HHmm>-iphone/`, and transcribes it like a Mac recording (the
+`on_stop` hook runs too). A recording is moved only once every file in it has
+downloaded; moving it out of iCloud Drive frees the space there.
+
+Every transcript (Mac recordings included, and ones made before the iPhone app
+existed) is published back to the app's iCloud folder as `transcript.json` and
+`meta.json`, so the iPhone can list, search, and read them. Audio is not
+published. Set `"publish_transcripts": false` to keep transcripts on the Mac.
+
+The Mac needs to be signed in to the same iCloud account with iCloud Drive
+on. The first import may ask for access to iCloud Drive.
+
 ## Capture recovery
 
 macOS audio routes are not stable for the length of a meeting — connecting or
@@ -236,6 +253,11 @@ Optional, at `~/.config/quill/config.json`:
   (default `false`).
 - `floating_indicator` — show the floating recording indicator (default
   `true`).
+- `inbox_dir` — where iPhone recordings arrive (default: the iPhone app's
+  iCloud container, `~/Library/Mobile Documents/iCloud~com~eggdev~quill/Documents/Inbox`).
+  An empty string turns importing off.
+- `publish_transcripts` — copy transcripts to iCloud for the iPhone app to
+  read (default `true`).
 
 Config changes apply within a few seconds; no restart needed.
 

@@ -1,0 +1,43 @@
+{
+  "duration_seconds" : 1205,
+  "ended" : "2026-10-26T15:50:05Z",
+  "schema_version" : 2,
+  "started" : "2026-10-26T15:30:00Z",
+  "status" : "recovered",
+  "tracks" : [
+    {
+      "interruptions" : [
+        {
+          "attempts" : 1,
+          "detected_offset_ms" : 252340,
+          "reason" : "audio session interrupted",
+          "recovered_offset_ms" : 318020
+        }
+      ],
+      "kind" : "mic",
+      "segments" : [
+        {
+          "channels" : 1,
+          "end_offset_ms" : 252340,
+          "file" : "mic.caf",
+          "frames_written" : 12112320,
+          "sample_rate_hz" : 48000,
+          "start_offset_ms" : 0
+        },
+        {
+          "channels" : 1,
+          "end_offset_ms" : 1205500,
+          "file" : "mic-002.caf",
+          "frames_written" : 42599040,
+          "sample_rate_hz" : 48000,
+          "start_offset_ms" : 318020
+        }
+      ],
+      "speaker" : "room",
+      "status" : "recovered",
+      "warnings" : [
+
+      ]
+    }
+  ]
+}

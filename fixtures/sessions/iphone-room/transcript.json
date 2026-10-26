@@ -1,0 +1,25 @@
+{
+  "created_at" : "2026-10-26T15:52:10Z",
+  "engine" : "parakeet",
+  "model" : "parakeet-tdt-0.6b-v2",
+  "segments" : [
+    {
+      "end_ms" : 4200,
+      "speaker" : "room",
+      "start_ms" : 300,
+      "text" : "Okay, let's start with the punch list for the third floor."
+    },
+    {
+      "end_ms" : 9800,
+      "speaker" : "room",
+      "start_ms" : 4600,
+      "text" : "Drywall is done on the north side, paint starts Monday."
+    },
+    {
+      "end_ms" : 321500,
+      "speaker" : "room",
+      "start_ms" : 318400,
+      "text" : "Sorry, I had to take that. Where were we?"
+    }
+  ]
+}

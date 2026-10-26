@@ -28,11 +28,12 @@ Quill product
 | Path | Responsibility |
 |---|---|
 | `macos/` | Complete native macOS implementation and Swift package |
+| `ios/` | iPhone capture companion: records and hands sessions to the Mac ([ADR-002](decisions/002-ios-capture-companion.md)) |
 | `windows/` | Native Windows implementation and platform documentation |
 | `linux/` | Native Linux implementation boundary and platform documentation |
 | `docs/` | Current architecture and historical decisions |
 | `.plan/` | Product roadmap and active implementation plans |
-| `fixtures/` | Future cross-platform session and transcript compatibility fixtures |
+| `fixtures/` | Cross-platform session compatibility fixtures, read by each platform's tests |
 | `scripts/` | Stable repository-level developer entry points |
 
 ## Shared contract
@@ -56,7 +57,8 @@ schema v2 is the shared contract for that:
 
 - `schema_version: 2`, session `started`/`ended` (ISO 8601, human-readable
   only), `duration_seconds`, and a session `status`;
-- `tracks[]`, each with `kind` (`mic`/`system`), `speaker` (`me`/`them`), a
+- `tracks[]`, each with `kind` (`mic`/`system`), `speaker` (`me`/`them`, or
+  `room` for the iPhone's single microphone, which hears everyone), a
   final `status`, `segments[]`, `interruptions[]`, and `warnings[]`;
 - each segment records `file`, `start_offset_ms`, `end_offset_ms`,
   `frames_written`, `sample_rate_hz`, and `channels`;
@@ -88,8 +90,9 @@ Rules the schema encodes:
   `start_offset_ms`; capture gaps stay visible as timestamp gaps in the merged
   transcript.
 
-Formal JSON schemas and compatibility fixtures will be extracted before the
-Windows capture probe becomes a full application. Until then, the macOS output
+The first compatibility fixture, `fixtures/sessions/iphone-room/meta.json`,
+is checked by both the macOS and iPhone tests. Formal JSON schemas will be
+extracted before the Windows capture probe becomes a full application. Until then, the macOS output
 implemented in `macos/Sources/quill/SessionMeta.swift`,
 `macos/Sources/quill/RecordingSession.swift`, and
 `macos/Sources/quill/Transcription/TranscriptionCoordinator.swift` is the
