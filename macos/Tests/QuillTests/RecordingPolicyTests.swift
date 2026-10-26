@@ -100,6 +100,22 @@ final class RecordingPolicyTests: XCTestCase {
         XCTAssertEqual(p.origin, .meeting(sync))
     }
 
+    func testTurningMeetingsOffKeepsTheRecordingAndItsStopRules() {
+        var p = policy(meetings: .auto, calls: .ask)
+        let sync = meeting("sync", from: 0, to: 1800)
+        guard case .start(let origin)? = p.tick(now: at(0), meetings: [sync], holding: [], quiet: 0) else {
+            return XCTFail("expected the meeting to start")
+        }
+        p.started(origin)
+
+        p.configure(meetings: .off, calls: .off, timing: MeetingScheduler.Timing())
+        XCTAssertNil(p.tick(now: at(600), meetings: [sync], holding: [], quiet: 0))
+        XCTAssertEqual(p.origin, .meeting(sync))
+        // Past the end, still talking: keeps going. Then quiet: stops.
+        XCTAssertNil(p.tick(now: at(1900), meetings: [sync], holding: [], quiet: 10))
+        XCTAssertEqual(p.tick(now: at(1900), meetings: [sync], holding: [], quiet: 120), .stop(.ended))
+    }
+
     func testMeetingsOffIgnoresAStaleMeetingList() {
         var p = policy(meetings: .off, calls: .ask)
         let sync = meeting("sync", from: 0, to: 1800)
