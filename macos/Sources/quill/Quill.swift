@@ -96,6 +96,8 @@ final class AppController {
     private var meetingsFetchedAt = Date.distantPast
     private var reloadPending = false
     private var calendarTimer: Timer?
+    private var inboxTimer: Timer?
+    private let inboxQueue = DispatchQueue(label: "quill.inbox")
     private var requestedCalendarAccess = false
     /// "Hide until next recording" from the indicator's menu.
     private var indicatorSuppressed = false
@@ -115,13 +117,15 @@ final class AppController {
         calendar.onChange = { [weak self] in self?.scheduleReload() }
         micUsage.onChange = { [weak self] in self?.calendarTick() }
 
-        Task { [transcription, root] in
+        Task { [weak controller = self, transcription, root] in
             await transcription.setStatusHandler { status in
                 Task { @MainActor [weak self] in
                     self?.showTranscription(status)
                 }
             }
             await transcription.resumePending(root: root)
+            // After the rescan, so an imported session is queued only once.
+            await controller?.startInboxImports()
         }
 
         // A meeting can start at any moment; a 2 s pass over the cached
@@ -138,6 +142,7 @@ final class AppController {
     /// Stop any live session cleanly (finalizing files) and exit.
     func shutdown() {
         calendarTimer?.invalidate()
+        inboxTimer?.invalidate()
         stopSession()
         NSApp.terminate(nil)
     }
@@ -382,6 +387,38 @@ final class AppController {
             }
         }
         menuBar.updateCalendar(mode: mode, detail: detail)
+    }
+
+    // MARK: - iPhone recordings
+
+    /// iPhone sessions arrive through iCloud Drive; checking the inbox every
+    /// 30 s is plenty for something that is transcribed afterwards anyway.
+    private func startInboxImports() {
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.importFromPhone() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        inboxTimer = timer
+        importFromPhone()
+    }
+
+    /// Off the main thread: move finished iPhone sessions into the recordings
+    /// root and queue each for transcription like a session recorded here,
+    /// then publish any new transcripts back for the iPhone to read.
+    private func importFromPhone() {
+        guard let inbox = Config.inboxDir() else { return }
+        let library = Config.libraryDir()
+        inboxQueue.async { [root, transcription] in
+            for dir in InboxImporter(inbox: inbox, root: root).importReady() {
+                FileHandle.standardError.write(Data("↓ imported \(dir.lastPathComponent) from iPhone\n".utf8))
+                Task { await transcription.enqueue(dir) }
+            }
+            guard let library else { return }
+            let published = TranscriptPublisher(root: root, library: library).publish()
+            if !published.isEmpty {
+                FileHandle.standardError.write(Data("↑ published \(published.count) transcript(s) to iPhone\n".utf8))
+            }
+        }
     }
 
     // MARK: - Floating indicator

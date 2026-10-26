@@ -10,3 +10,6 @@ obj/
 
 # local planning notes
 .plan/
+
+# Xcode per-user state
+xcuserdata/

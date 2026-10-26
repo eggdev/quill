@@ -23,6 +23,30 @@ enum Config {
         .appendingPathComponent("Recordings", isDirectory: true)
 
     /// The configured recordings root, or nil if no config file / no key.
+    /// Where sessions recorded on the iPhone arrive: the iPhone app's iCloud
+    /// container, as iCloud Drive syncs it to this Mac. `inbox_dir` points
+    /// elsewhere; an empty string turns importing off.
+    static func inboxDir() -> URL? {
+        guard let dir = load()?["inbox_dir"] as? String else { return defaultInbox }
+        guard !dir.isEmpty else { return nil }
+        return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
+    /// Where transcripts are published for the iPhone to read: `Library`
+    /// beside the inbox. nil when importing is off, the iPhone app's folder
+    /// isn't on this Mac yet, or `publish_transcripts` is false.
+    static func libraryDir() -> URL? {
+        guard load()?["publish_transcripts"] as? Bool ?? true, let inbox = inboxDir() else { return nil }
+        let documents = inbox.deletingLastPathComponent()
+        // Never create the iCloud container ourselves; iCloud makes it once
+        // the iPhone app has used it.
+        guard FileManager.default.fileExists(atPath: documents.path) else { return nil }
+        return documents.appendingPathComponent("Library", isDirectory: true)
+    }
+
+    static let defaultInbox = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Mobile Documents/iCloud~com~eggdev~quill/Documents/Inbox", isDirectory: true)
+
     static func recordingsDir() -> URL? {
         guard let dir = load()?["recordings_dir"] as? String, !dir.isEmpty else { return nil }
         return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
