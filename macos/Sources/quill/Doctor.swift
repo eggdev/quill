@@ -12,6 +12,8 @@ struct Check {
     let name: String
     let status: CheckStatus
     let remediation: String?
+    /// Shown after "ok" for a passing check.
+    var detail: String? = nil
 }
 
 enum DoctorReport {
@@ -87,6 +89,16 @@ enum DoctorReport {
                 remediation: nil
             )
         }
+        if Config.transcriptionEngine() == "remote" {
+            guard let url = Config.transcriptionURL() else {
+                return Check(
+                    name: "transcription",
+                    status: .fail("engine is remote but transcription.url is missing or invalid"),
+                    remediation: "set transcription.url in \(Config.path.path), e.g. https://spark.tailnet.ts.net:8091"
+                )
+            }
+            return Check(name: "transcription", status: .ok, remediation: nil, detail: "remote · \(url.absoluteString)")
+        }
         let cache = AsrModels.defaultCacheDirectory(for: .v2)
         if AsrModels.modelsExist(at: cache, version: .v2) {
             return Check(name: "transcription", status: .ok, remediation: nil)
@@ -96,6 +108,34 @@ enum DoctorReport {
             status: .warn("parakeet models not downloaded (~600 MB)"),
             remediation: "downloads automatically on first transcription — record a short test session while online"
         )
+    }
+
+    /// Doctor command only — the daemon's startup checks must not wait on the
+    /// network. Unreachable is a warning: sessions fall back to parakeet.
+    static func checkRemoteServer() -> Check? {
+        guard Config.transcriptionEnabled(), Config.transcriptionEngine() == "remote",
+            let url = Config.transcriptionURL()
+        else { return nil }
+        var request = URLRequest(url: url.appendingPathComponent("health"))
+        request.timeoutInterval = 5
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var result: Check?
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { done.signal() }
+            let status = (response as? HTTPURLResponse)?.statusCode
+            if status == 200, let data, let body = String(data: data, encoding: .utf8) {
+                result = Check(name: "transcription server", status: .ok, remediation: nil, detail: body)
+            } else {
+                let why = error?.localizedDescription ?? "HTTP \(status ?? 0)"
+                result = Check(
+                    name: "transcription server",
+                    status: .warn("\(url.absoluteString) unreachable: \(why)"),
+                    remediation: "sessions transcribe locally with parakeet until it is back; see server/README.md"
+                )
+            }
+        }.resume()
+        done.wait()
+        return result
     }
 
     /// Calendar access only matters once meeting recording is turned on, and
@@ -127,7 +167,7 @@ enum DoctorReport {
         for c in checks {
             let (mark, label): (String, String) = {
                 switch c.status {
-                case .ok: return ("✓", "ok")
+                case .ok: return ("✓", c.detail.map { "ok · \($0)" } ?? "ok")
                 case .warn(let msg): return ("!", msg)
                 case .fail(let msg): return ("✗", msg)
                 }

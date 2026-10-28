@@ -19,6 +19,39 @@ final class TranscriptionCoordinatorTests: XCTestCase {
             ])
     }
 
+    func testShiftedLabelsDiarizedVoicesWithinTheTrack() {
+        let raw = [
+            TranscriptSegment(start: 0, end: 1, text: "hi", speaker: 0),
+            TranscriptSegment(start: 1, end: 2, text: "hey", speaker: 1),
+            TranscriptSegment(start: 2, end: 3, text: "so"),
+        ]
+        XCTAssertEqual(
+            Transcript.shifted(raw, speaker: "room", offsetMs: 0).map(\.speaker),
+            ["speaker 1", "speaker 2", "room"])
+        XCTAssertEqual(
+            Transcript.shifted(raw, speaker: "them", offsetMs: 0).map(\.speaker),
+            ["them 1", "them 2", "them"])
+    }
+
+    func testRemoteResponseDecodes() throws {
+        let body = Data(
+            """
+            {"engine": "nemo", "model": "m", "duration": 3.5,
+             "segments": [{"start": 0.16, "end": 1.2, "text": "Alright.", "speaker": 1},
+                          {"start": 1.9, "end": 2.1, "text": "Okay.", "speaker": null}]}
+            """.utf8)
+        let segments = try RemoteEngine.segments(from: body, base: URL(string: "http://spark:8091")!)
+        XCTAssertEqual(segments.map(\.text), ["Alright.", "Okay."])
+        XCTAssertEqual(segments.map(\.speaker), [1, nil])
+        XCTAssertEqual(segments[0].start, 0.16)
+    }
+
+    func testRemoteGarbageIsUnreachable() {
+        XCTAssertThrowsError(try RemoteEngine.segments(from: Data("<html>".utf8), base: URL(string: "http://x")!)) {
+            guard case RemoteEngine.EngineError.unreachable = $0 else { return XCTFail("\($0)") }
+        }
+    }
+
     func testMergeInterleavesSegmentsAndRetainsGap() {
         // First mic segment ends at 10 s; the second starts at 25 s after a
         // 15 s capture gap. The system track spans the whole session.

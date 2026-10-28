@@ -1,0 +1,13 @@
+[Unit]
+Description=quill transcription server (Parakeet + Sortformer)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/quill-server
+ExecStart=%h/quill-server/.venv/bin/uvicorn quill_server.app:app --host 127.0.0.1 --port 8091
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

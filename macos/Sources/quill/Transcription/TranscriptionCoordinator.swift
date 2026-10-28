@@ -17,6 +17,9 @@ actor TranscriptionCoordinator {
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
+    /// Set when the remote engine failed during this drain; the rest of the
+    /// queue goes to the local engine instead of retrying a dead host.
+    private var remoteDown = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
 
@@ -81,7 +84,16 @@ actor TranscriptionCoordinator {
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             do {
                 let meeting = SessionMeta.meeting(in: dir)
-                try await transcribe(dir, meeting: meeting)
+                do {
+                    try await transcribe(dir, meeting: meeting)
+                } catch let error as RemoteEngine.EngineError {
+                    guard case .unreachable = error else { throw error }
+                    log(dir, "\(error) — transcribing locally")
+                    await engine?.release()
+                    engine = nil
+                    remoteDown = true
+                    try await transcribe(dir, meeting: meeting)
+                }
                 let name = meeting?.title ?? dir.lastPathComponent
                 notifyUser(title: "quill — transcript ready", body: name)
                 runHook(for: dir)
@@ -96,6 +108,7 @@ actor TranscriptionCoordinator {
         }
         await engine?.release()
         engine = nil
+        remoteDown = false
         publish(lastFailure.map { .failed(session: $0) } ?? .idle)
         draining = false
         // An enqueue that landed between the loop exiting and the release
@@ -123,7 +136,11 @@ actor TranscriptionCoordinator {
             // log it and keep going.
             let segments: [TranscriptSegment]
             do {
-                segments = try await engine.transcribe(audio)
+                // One voice on the mic is the user; any other track may hold
+                // several people.
+                segments = try await engine.transcribe(audio, diarize: input.speaker != "me")
+            } catch RemoteEngine.EngineError.unreachable(let url, let why) {
+                throw RemoteEngine.EngineError.unreachable(url, why)
             } catch {
                 log(dir, "skipping \(input.file): \(error)")
                 continue
@@ -144,8 +161,17 @@ actor TranscriptionCoordinator {
 
     private func preparedEngine() async throws -> TranscriptionEngine {
         if let engine { return engine }
-        let configured = Config.transcriptionEngine()
-        if configured != "parakeet" {
+        switch Config.transcriptionEngine() {
+        case "remote" where !remoteDown:
+            if let url = Config.transcriptionURL() {
+                let engine = try await RemoteEngine.connect(url)
+                self.engine = engine
+                return engine
+            }
+            FileHandle.standardError.write(Data("warning: transcription.url missing or invalid — using parakeet\n".utf8))
+        case "parakeet", "remote":
+            break
+        case let configured:
             FileHandle.standardError.write(
                 Data(
                     "warning: unknown transcription engine \"\(configured)\" — using parakeet\n".utf8
@@ -213,12 +239,20 @@ struct Transcript: Codable {
     ) -> [Segment] {
         segments.map {
             Segment(
-                speaker: speaker,
+                speaker: label(track: speaker, index: $0.speaker),
                 start_ms: Int($0.start * 1000) + offsetMs,
                 end_ms: Int($0.end * 1000) + offsetMs,
                 text: $0.text
             )
         }
+    }
+
+    /// A diarized voice within one track: "speaker 2" on the iPhone's room
+    /// track, "them 2" on a call. Indices restart in each segment file, so
+    /// after an interruption the same person can get a different number.
+    static func label(track: String, index: Int?) -> String {
+        guard let index else { return track }
+        return "\(track == "room" ? "speaker" : track) \(index + 1)"
     }
 
     /// Write transcript.json and render transcript.md. Both writes are atomic

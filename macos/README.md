@@ -229,6 +229,13 @@ Optional, at `~/.config/quill/config.json`:
 - `recordings_dir` — where sessions land. Resolution order: `--out` flag >
   config > `~/Recordings`.
 - `transcription.enabled` — set `false` to just record.
+- `transcription.engine` — `parakeet` (default, on this Mac) or `remote`.
+  `remote` sends each recording to a [quill server](../server/README.md) on
+  your own network, which adds speaker labels (`speaker 1`, `speaker 2`). When
+  the server can't be reached, quill transcribes locally and logs why in the
+  session's `transcribe.log`.
+- `transcription.url` — the server's HTTPS address for `remote`, e.g.
+  `https://spark.tailnet.ts.net:8091`.
 - `mic_voice_processing` — Apple's echo cancellation on the mic (default off).
   Set `true` when recording meetings through the speakers, so playback doesn't
   bleed into the mic track and get transcribed twice as "me". The trade: while

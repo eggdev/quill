@@ -1,6 +1,6 @@
 # Quill architecture
 
-Last updated: `2026.08.04`
+Last updated: `2026.10.28`
 
 Quill is one product with separate native implementations for each supported
 desktop platform. Platform code does not share a runtime or source language.
@@ -29,6 +29,7 @@ Quill product
 |---|---|
 | `macos/` | Complete native macOS implementation and Swift package |
 | `ios/` | iPhone capture companion: records and hands sessions to the Mac ([ADR-002](decisions/002-ios-capture-companion.md)) |
+| `server/` | Optional transcription and speaker labels on a GPU host on the user's network ([ADR-003](decisions/003-remote-transcription-server.md)) |
 | `windows/` | Native Windows implementation and platform documentation |
 | `linux/` | Native Linux implementation boundary and platform documentation |
 | `docs/` | Current architecture and historical decisions |
@@ -47,7 +48,7 @@ The platforms share these concepts even when their audio containers differ:
 - canonical, timed, speaker-tagged `transcript.json`;
 - readable `transcript.md` generated from the canonical transcript;
 - a recoverable filesystem-backed transcription queue; and
-- local-only recording and inference.
+- recording and inference only on machines the user owns.
 
 ### Session metadata v2
 

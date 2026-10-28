@@ -67,7 +67,8 @@ struct Doctor: ParsableCommand {
     )
 
     func run() throws {
-        let checks = DoctorReport.run(recordingsRoot: Config.resolveRoot(cliOverride: nil))
+        var checks = DoctorReport.run(recordingsRoot: Config.resolveRoot(cliOverride: nil))
+        if let server = DoctorReport.checkRemoteServer() { checks.append(server) }
         DoctorReport.print(checks)
         if !DoctorReport.allOK(checks) {
             throw ExitCode(1)
@@ -119,13 +120,13 @@ final class AppController {
 
         Task { [weak controller = self, transcription, root] in
             await transcription.setStatusHandler { status in
-                Task { @MainActor [weak self] in
-                    self?.showTranscription(status)
+                Task { @MainActor in
+                    controller?.showTranscription(status)
                 }
             }
             await transcription.resumePending(root: root)
             // After the rescan, so an imported session is queued only once.
-            await controller?.startInboxImports()
+            controller?.startInboxImports()
         }
 
         // A meeting can start at any moment; a 2 s pass over the cached

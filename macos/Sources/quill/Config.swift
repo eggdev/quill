@@ -4,7 +4,7 @@ import Foundation
 ///
 ///     {
 ///       "recordings_dir": "~/Recordings",
-///       "transcription": { "enabled": true, "engine": "parakeet" },
+///       "transcription": { "enabled": true, "engine": "remote", "url": "http://spark:8091" },
 ///       "mic_voice_processing": true,
 ///       "on_stop": "my-hook",
 ///       "calendar": { "mode": "auto", "require_video_link": true },
@@ -64,10 +64,18 @@ enum Config {
         transcription()?["enabled"] as? Bool ?? true
     }
 
-    /// Configured engine name. Only "parakeet" ships today; the coordinator
-    /// warns and falls back for anything else.
+    /// Configured engine name: "parakeet" (local, the default) or "remote".
+    /// The coordinator warns and uses parakeet for anything else.
     static func transcriptionEngine() -> String {
         transcription()?["engine"] as? String ?? "parakeet"
+    }
+
+    /// Base URL of the transcription server the "remote" engine uses, e.g.
+    /// "https://<host>.<tailnet>.ts.net:8091".
+    static func transcriptionURL() -> URL? {
+        guard let raw = transcription()?["url"] as? String, let url = URL(string: raw), url.scheme != nil
+        else { return nil }
+        return url
     }
 
     private static func transcription() -> [String: Any]? {
