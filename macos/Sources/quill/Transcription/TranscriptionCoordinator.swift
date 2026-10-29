@@ -119,33 +119,50 @@ actor TranscriptionCoordinator {
     private func transcribe(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
         // Both metadata schemas normalize to ordered (file, speaker, offset)
         // inputs — one per segment under v2, one per track under v1. Each
-        // segment transcribes independently and shifts onto the session
-        // clock, so timing gaps around a capture recovery stay visible.
+        // segment shifts onto the session clock, so timing gaps around a
+        // capture recovery stay visible.
         let (inputs, captureStatus) = try SessionMeta.readInputs(from: dir)
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
-        for input in inputs {
-            let audio = dir.appendingPathComponent(input.file)
-            guard FileManager.default.fileExists(atPath: audio.path) else {
-                log(dir, "skipping missing segment \(input.file)")
-                continue
+        for track in Self.tracks(inputs) {
+            let present = track.filter { input in
+                let found = FileManager.default.fileExists(atPath: dir.appendingPathComponent(input.file).path)
+                if !found { log(dir, "skipping missing segment \(input.file)") }
+                return found
             }
-            log(dir, "transcribing \(input.file) (\(engine.name))")
-            // One bad segment (empty, truncated) shouldn't cost us the rest —
-            // log it and keep going.
-            let segments: [TranscriptSegment]
+            guard let speaker = present.first?.speaker else { continue }
+            // One voice on the mic is the user; any other track may hold
+            // several people.
+            let diarize = speaker != "me"
+            let files = present.map { dir.appendingPathComponent($0.file) }
+            log(dir, "transcribing \(present.map(\.file).joined(separator: ", ")) (\(engine.name))")
+            var results: [[TranscriptSegment]]?
             do {
-                // One voice on the mic is the user; any other track may hold
-                // several people.
-                segments = try await engine.transcribe(audio, diarize: input.speaker != "me")
-            } catch RemoteEngine.EngineError.unreachable(let url, let why) {
-                throw RemoteEngine.EngineError.unreachable(url, why)
-            } catch {
-                log(dir, "skipping \(input.file): \(error)")
-                continue
+                results = try await engine.transcribe(track: files, diarize: diarize)
+            } catch RemoteEngine.EngineError.rejected(let why) where files.count > 1 {
+                // One bad file shouldn't cost the rest of the track; retry
+                // file by file below.
+                log(dir, "track rejected (\(why)) — retrying file by file")
             }
-            merged += Transcript.shifted(segments, speaker: input.speaker, offsetMs: input.offsetMs)
+            for (i, input) in present.enumerated() {
+                let segments: [TranscriptSegment]
+                if let results {
+                    segments = results[i]
+                } else {
+                    // One bad segment (empty, truncated) shouldn't cost us the
+                    // rest — log it and keep going.
+                    do {
+                        segments = try await engine.transcribe(files[i], diarize: diarize)
+                    } catch RemoteEngine.EngineError.unreachable(let url, let why) {
+                        throw RemoteEngine.EngineError.unreachable(url, why)
+                    } catch {
+                        log(dir, "skipping \(input.file): \(error)")
+                        continue
+                    }
+                }
+                merged += Transcript.shifted(segments, speaker: input.speaker, offsetMs: input.offsetMs)
+            }
         }
         merged.sort { $0.start_ms < $1.start_ms }
 
@@ -157,6 +174,20 @@ actor TranscriptionCoordinator {
         )
         try transcript.write(to: dir, captureStatus: captureStatus, meeting: meeting)
         log(dir, "done — \(merged.count) segments")
+    }
+
+    /// Consecutive inputs of one track. Segment files of a track are listed
+    /// together and in order in both metadata schemas.
+    static func tracks(_ inputs: [SessionMeta.TrackInput]) -> [[SessionMeta.TrackInput]] {
+        var out: [[SessionMeta.TrackInput]] = []
+        for input in inputs {
+            if let last = out.last?.last, last.speaker == input.speaker {
+                out[out.count - 1].append(input)
+            } else {
+                out.append([input])
+            }
+        }
+        return out
     }
 
     private func preparedEngine() async throws -> TranscriptionEngine {
@@ -248,8 +279,7 @@ struct Transcript: Codable {
     }
 
     /// A diarized voice within one track: "speaker 2" on the iPhone's room
-    /// track, "them 2" on a call. Indices restart in each segment file, so
-    /// after an interruption the same person can get a different number.
+    /// track, "them 2" on a call.
     static func label(track: String, index: Int?) -> String {
         guard let index else { return track }
         return "\(track == "room" ? "speaker" : track) \(index + 1)"

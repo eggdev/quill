@@ -1,0 +1,39 @@
+[Unit]
+Description=Nemotron 3.5 Transcribe on vLLM, for the quill server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/nemo-speech
+# flashinfer compiles kernels for the GPU on first start: it needs ninja
+# (from the venv) and nvcc.
+Environment=PATH=%h/nemo-speech/.venv/bin:/usr/local/cuda/bin:/usr/bin:/bin
+Environment=VLLM_PLUGINS=nemo_speechlm
+# Each parallel kernel compile can take several GB of the shared memory.
+Environment=MAX_JOBS=4
+# Recordings up to one hour (the default is 600 seconds).
+Environment=VLLM_MAX_AUDIO_DECODE_DURATION_S=3600
+Environment=VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=180
+# Word timestamps require the V1 model runner.
+Environment=VLLM_USE_V2_MODEL_RUNNER=0
+# Flags from the FP8 model card. GPU and CPU share the Spark's memory, so
+# this takes 60% of it, and few sequences: one track at a time.
+ExecStart=%h/nemo-speech/.venv/bin/vllm serve %h/models/Nemotron-3.5-Transcribe-FP8 \
+  --served-model-name nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8 \
+  --host 127.0.0.1 --port 8092 \
+  --trust-remote-code --dtype bfloat16 --kv-cache-dtype auto --gpu-memory-utilization 0.60 \
+  --max-model-len 65536 --max-num-batched-tokens 4096 --max-num-seqs 4 \
+  --enable-chunked-prefill --no-enable-prefix-caching \
+  --use-replayssm --mamba-backend flashinfer --mamba-cache-mode none \
+  --mm-processor-cache-gb 0 --no-async-scheduling \
+  --limit-mm-per-prompt '{"audio":{"count":1,"length":57600000}}' \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \
+  --reasoning-parser nemotron_v3 \
+  --trust-request-mm-kwargs \
+  --middleware nemo.collections.speechlm2.vllm.salm.ctc_serving.ctc_timestamp_middleware
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

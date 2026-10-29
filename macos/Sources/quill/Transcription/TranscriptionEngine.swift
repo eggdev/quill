@@ -1,8 +1,8 @@
 import Foundation
 
 /// One timed span of recognized speech from a single track, relative to that
-/// track's own start. `speaker` is a diarizer's 0-based index when the engine
-/// found more than one voice in the file; nil leaves the track's own label.
+/// track's own start. `speaker` is a 0-based voice index when the engine
+/// found more than one voice in the track; nil leaves the track's own label.
 struct TranscriptSegment: Sendable {
     let start: TimeInterval
     let end: TimeInterval
@@ -22,5 +22,13 @@ protocol TranscriptionEngine: Sendable {
     /// `diarize` asks for per-voice speaker indices; engines without a
     /// diarizer ignore it.
     func transcribe(_ audio: URL, diarize: Bool) async throws -> [TranscriptSegment]
+    /// All of one track's segment files in a single pass, one result per file,
+    /// so a voice keeps its number across an interruption. nil when the
+    /// engine only works file by file.
+    func transcribe(track files: [URL], diarize: Bool) async throws -> [[TranscriptSegment]]?
     func release() async
+}
+
+extension TranscriptionEngine {
+    func transcribe(track files: [URL], diarize: Bool) async throws -> [[TranscriptSegment]]? { nil }
 }

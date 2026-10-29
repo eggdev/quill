@@ -33,17 +33,49 @@ final class TranscriptionCoordinatorTests: XCTestCase {
             ["them 1", "them 2", "them"])
     }
 
-    func testRemoteResponseDecodes() throws {
+    func testRemoteResponseDecodesOneResultPerFile() throws {
         let body = Data(
             """
-            {"engine": "nemo", "model": "m", "duration": 3.5,
-             "segments": [{"start": 0.16, "end": 1.2, "text": "Alright.", "speaker": 1},
-                          {"start": 1.9, "end": 2.1, "text": "Okay.", "speaker": null}]}
+            {"engine": "nemo", "model": "m",
+             "files": [{"duration": 3.5,
+                        "segments": [{"start": 0.16, "end": 1.2, "text": "Alright.", "speaker": 1},
+                                     {"start": 1.9, "end": 2.1, "text": "Okay.", "speaker": null}]},
+                       {"duration": 1.0, "segments": []}]}
             """.utf8)
-        let segments = try RemoteEngine.segments(from: body, base: URL(string: "http://spark:8091")!)
-        XCTAssertEqual(segments.map(\.text), ["Alright.", "Okay."])
-        XCTAssertEqual(segments.map(\.speaker), [1, nil])
-        XCTAssertEqual(segments[0].start, 0.16)
+        let files = try RemoteEngine.segments(from: body, base: URL(string: "http://spark:8091")!)
+        XCTAssertEqual(files.count, 2)
+        XCTAssertEqual(files[0].map(\.text), ["Alright.", "Okay."])
+        XCTAssertEqual(files[0].map(\.speaker), [1, nil])
+        XCTAssertEqual(files[0][0].start, 0.16)
+        XCTAssertTrue(files[1].isEmpty)
+    }
+
+    func testTracksGroupConsecutiveSegmentFiles() {
+        let inputs = [
+            SessionMeta.TrackInput(file: "mic.caf", speaker: "me", offsetMs: 0),
+            SessionMeta.TrackInput(file: "mic-2.caf", speaker: "me", offsetMs: 25000),
+            SessionMeta.TrackInput(file: "system.caf", speaker: "them", offsetMs: 0),
+        ]
+        XCTAssertEqual(
+            TranscriptionCoordinator.tracks(inputs).map { $0.map(\.file) },
+            [["mic.caf", "mic-2.caf"], ["system.caf"]])
+    }
+
+    func testMultipartCarriesEachFileInOrder() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.caf")
+        let b = dir.appendingPathComponent("b.caf")
+        try Data("AAA".utf8).write(to: a)
+        try Data("BBB".utf8).write(to: b)
+        let body = String(decoding: try RemoteEngine.multipart([a, b], boundary: "x"), as: UTF8.self)
+        XCTAssertEqual(
+            body,
+            "--x\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"a.caf\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\nAAA\r\n"
+                + "--x\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"b.caf\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\nBBB\r\n--x--\r\n")
     }
 
     func testRemoteGarbageIsUnreachable() {

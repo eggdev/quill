@@ -1,10 +1,12 @@
 [Unit]
-Description=quill transcription server (Parakeet + Sortformer)
-After=network.target
+Description=quill transcription server (adapter in front of quill-vllm)
+After=network.target quill-vllm.service
+Wants=quill-vllm.service
 
 [Service]
 Type=simple
 WorkingDirectory=%h/quill-server
+Environment=QUILL_VLLM_URL=http://127.0.0.1:8092
 ExecStart=%h/quill-server/.venv/bin/uvicorn quill_server.app:app --host 127.0.0.1 --port 8091
 Restart=on-failure
 RestartSec=10
