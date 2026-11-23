@@ -5,24 +5,54 @@ import QuillKit
 
 /// Every recording the app can show: sessions recorded on this iPhone (kept
 /// with their audio for a while after sending, so they can be played back),
-/// joined with the transcripts the Mac publishes to iCloud — for its own
-/// recordings as well as these.
+/// joined with the sessions the hub lists — from Macs as well as iPhones.
 @MainActor @Observable
 final class Library {
-    private(set) var recordings: [RecordingSummary] = []
-    /// False when the app has no iCloud account to send through.
-    private(set) var iCloudAvailable = true
-    /// The first scan has finished, so an empty list really is empty.
-    private(set) var loaded = false
-    private var libraryDir: URL?
+    enum HubState: Equatable {
+        /// No hub address saved.
+        case notSet
+        /// Not asked yet since launch or since the address changed.
+        case unknown
+        case reachable
+        case unreachable
+    }
 
-    nonisolated private static let sessionsDir = FileManager.default
+    private(set) var recordings: [RecordingSummary] = []
+    private(set) var hubState: HubState
+    /// The first refresh has finished, so an empty list really is empty.
+    private(set) var loaded = false
+
+    private var local: [LocalSession] = []
+    private var sync = HubSyncState()
+    private var texts: [String: HubCache.Text] = [:]
+    /// The hub `sync` came from; a different one starts a fresh list.
+    private var syncedHub: URL?
+    private var cacheLoaded = false
+    private var refreshing: Task<Void, Never>?
+    /// What the hub listed, once a list has been fetched from it since
+    /// launch (or since the address changed). Old iCloud folders are judged
+    /// against it, never against the cache.
+    private var catalog: HubCatalog?
+    /// Folders stuck on `missing_files` try again at launch and when the
+    /// address changes, not on every refresh.
+    private var resetMissingRounds = true
+    private var prefetching = false
+
+    nonisolated static let sessionsDir = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Sessions", isDirectory: true)
     /// Sent recordings keep their audio this long, for playback.
     private static let keepAudio: TimeInterval = 30 * 24 * 3600
-    /// Marks a local session as handed to iCloud.
-    nonisolated private static let sentMarker = ".sent"
+    /// Transcripts fetched at once in the background, for search.
+    private static let prefetchWidth = 3
+
+    init() {
+        hubState = HubSettings.baseURL == nil ? .notSet : .unknown
+        NotificationCenter.default.addObserver(forName: HubSender.didChange, object: nil, queue: .main) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadLocal() }
+        }
+    }
 
     func newSessionFolder(startedAt: Date) throws -> URL {
         let fm = FileManager.default
@@ -45,33 +75,50 @@ final class Library {
         return Self.readJSON(SessionManifest.self, at: dir.appendingPathComponent("meta.json"))
     }
 
-    /// The Mac's transcript, if it has published one.
+    /// The hub's transcript: from the cache when it's current, else fetched
+    /// and cached. Offline, an out-of-date copy is better than none.
     func transcript(for recording: RecordingSummary) async -> Transcript? {
-        guard let libraryDir else { return nil }
-        let url = libraryDir.appendingPathComponent(recording.name).appendingPathComponent("transcript.json")
-        return await Task.detached { Self.readJSON(Transcript.self, at: url) }.value
+        guard let id = recording.hubID else { return nil }
+        let cached = await Task.detached { HubCache.transcript(id: id) }.value
+        if let cached, cached.revision == recording.revision { return cached.transcript }
+        guard recording.stage == .transcribed, let revision = recording.revision, let api = HubSettings.api,
+            let fresh = try? await HubClient.transcript(api, id: id)
+        else { return cached?.transcript }
+        await Task.detached { HubCache.save(fresh, id: id, revision: revision) }.value
+        texts[id] = HubCache.Text(revision: revision, text: fresh.fullText)
+        publish()
+        return fresh
     }
 
+    /// Show what's on disk at once, then ask the hub for what changed.
+    /// Overlapping calls (the timer, pull to refresh, a finished recording)
+    /// share one pass.
     func refresh() async {
-        let scan = await Task.detached { Self.scan() }.value
-        libraryDir = scan.libraryDir
-        iCloudAvailable = scan.iCloudAvailable
-        recordings = RecordingSummary.merge(local: scan.local, published: scan.published)
-        loaded = true
+        if let refreshing { return await refreshing.value }
+        let pass = Task { await performRefresh() }
+        refreshing = pass
+        await pass.value
+        refreshing = nil
     }
 
-    /// Hand every unsent session to iCloud (a copy; the audio stays here for
-    /// playback), clear out audio past its keep date, then rescan.
+    /// Give every finished recording its session id and start whatever
+    /// upload or commit it still needs, clear out audio past its keep date,
+    /// then refresh.
     func sendFinished() async {
-        let unsent = Self.localFolders().filter { !Self.isSent($0) }
-        if !unsent.isEmpty {
-            let sent = await Task.detached { Outbox.send(unsent) }.value
-            for dir in unsent where sent?.contains(dir.lastPathComponent) == true {
-                FileManager.default.createFile(atPath: dir.appendingPathComponent(Self.sentMarker).path, contents: nil)
-            }
-        }
+        let folders = await Task.detached { Self.localFolders() }.value
+        let reset = resetMissingRounds
+        resetMissingRounds = false
+        await HubSender.shared.reconcile(folders: folders, catalog: catalog, resetMissingRounds: reset)
         pruneSentAudio()
         await refresh()
+    }
+
+    /// The address was changed in Settings: start over with the new hub.
+    func hubAddressChanged() {
+        hubState = HubSettings.baseURL == nil ? .notSet : .unknown
+        catalog = nil
+        resetMissingRounds = true
+        Task { await sendFinished() }
     }
 
     /// A folder with audio but no meta.json was cut off by the app quitting
@@ -103,55 +150,126 @@ final class Library {
             channels: Int(file.fileFormat.channelCount))
     }
 
-    // MARK: - Scanning
+    // MARK: - Refreshing
 
-    private struct Scan: Sendable {
-        var local: [LocalSession]
-        var published: [PublishedSession]
-        var libraryDir: URL?
-        var iCloudAvailable: Bool
+    private func performRefresh() async {
+        let hub = HubSettings.baseURL
+        if !cacheLoaded || hub != syncedHub {
+            let (state, cachedTexts) = await Task.detached { (HubCache.loadState(hub: hub), HubCache.loadTexts()) }.value
+            sync = state
+            texts = cachedTexts
+            syncedHub = hub
+            cacheLoaded = true
+        }
+        local = await Task.detached { Self.scanLocal() }.value
+        publish()
+
+        guard let hub else {
+            hubState = .notSet
+            loaded = true
+            return
+        }
+        let api = HubAPI(base: hub)
+        do {
+            var state = sync
+            var more = true
+            while more {
+                let after = state.revision
+                more = state.apply(try await HubClient.sessions(api, after: after), after: after)
+                // A new catalog makes what the hub listed before meaningless
+                // to the old-folder decisions until the refetch completes.
+                if state.catalog != sync.catalog { catalog = nil }
+            }
+            // The address may have changed while the pages loaded.
+            guard HubSettings.baseURL == hub else { return }
+            let fetched = state
+            if fetched != sync {
+                sync = fetched
+                await Task.detached { HubCache.save(fetched, hub: hub) }.value
+            }
+            catalog = HubCatalog(fetched.sessions.values)
+            hubState = .reachable
+        } catch {
+            guard HubSettings.baseURL == hub else { return }
+            hubState = .unreachable
+        }
+        loaded = true
+        publish()
+
+        guard hubState == .reachable else { return }
+        // The hub is back: anything that stalled while it was away goes now,
+        // and old iCloud folders the hub doesn't have start their upload.
+        let catalog = catalog
+        if local.contains(where: {
+            HubFolderPolicy.needsUpload(
+                name: $0.name, delivery: $0.delivery, legacySent: $0.legacySent, catalog: catalog)
+        }) {
+            let folders = await Task.detached { Self.localFolders() }.value
+            await HubSender.shared.reconcile(folders: folders, catalog: catalog, resetMissingRounds: false)
+        }
+        Task { await prefetchTranscripts(api: api) }
     }
 
-    /// Off the main thread: the iCloud container lookup can block.
-    nonisolated private static func scan() -> Scan {
-        let local = localFolders().compactMap { dir -> LocalSession? in
+    /// A delivery step finished in the background session.
+    private func reloadLocal() {
+        Task {
+            local = await Task.detached { Self.scanLocal() }.value
+            publish()
+        }
+    }
+
+    private func publish() {
+        recordings = RecordingSummary.merge(
+            local: local, hub: Array(sync.sessions.values), transcripts: texts.mapValues(\.text),
+            thisDevice: HubSettings.deviceID)
+    }
+
+    /// Search covers transcript text, so fetch the transcripts not cached
+    /// yet (or changed since), a few at a time.
+    private func prefetchTranscripts(api: HubAPI) async {
+        guard !prefetching else { return }
+        prefetching = true
+        defer { prefetching = false }
+        let wanted = sync.sessions.values
+            .filter { $0.status == .transcribed && texts[$0.id]?.revision != $0.revision }
+            .sorted { $0.revision > $1.revision }
+            .map { ($0.id, $0.revision) }
+        guard !wanted.isEmpty else { return }
+
+        await withTaskGroup(of: (String, HubCache.Text)?.self) { group in
+            var pending = wanted.makeIterator()
+            func fetchNext() {
+                guard let (id, revision) = pending.next() else { return }
+                group.addTask {
+                    guard let transcript = try? await HubClient.transcript(api, id: id) else { return nil }
+                    HubCache.save(transcript, id: id, revision: revision)
+                    return (id, HubCache.Text(revision: revision, text: transcript.fullText))
+                }
+            }
+            for _ in 0..<Self.prefetchWidth { fetchNext() }
+            var fetched = 0
+            for await result in group {
+                if let (id, text) = result {
+                    texts[id] = text
+                    fetched += 1
+                    if fetched % 10 == 0 { publish() }
+                }
+                fetchNext()
+            }
+        }
+        publish()
+    }
+
+    // MARK: - Local folders
+
+    nonisolated private static func scanLocal() -> [LocalSession] {
+        localFolders().compactMap { dir -> LocalSession? in
             readJSON(SessionManifest.self, at: dir.appendingPathComponent("meta.json")).map {
-                LocalSession(name: dir.lastPathComponent, manifest: $0, sent: isSent(dir))
+                LocalSession(
+                    name: dir.lastPathComponent, manifest: $0, delivery: HubDelivery.read(in: dir),
+                    legacySent: HubDelivery.isLegacySent(dir))
             }
         }
-        let container = FileManager.default.url(forUbiquityContainerIdentifier: Outbox.containerID)
-        let library = libraryOverride ?? container?.appendingPathComponent("Documents/Library", isDirectory: true)
-        return Scan(
-            local: local, published: library.map(published(in:)) ?? [], libraryDir: library,
-            iCloudAvailable: container != nil)
-    }
-
-    /// Transcripts the Mac published. iCloud lists folders before their files
-    /// arrive; ask for anything missing and pick it up on the next scan.
-    nonisolated private static func published(in library: URL) -> [PublishedSession] {
-        let fm = FileManager.default
-        let dirs = (try? fm.contentsOfDirectory(at: library, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
-        return dirs.compactMap { dir in
-            let transcriptURL = dir.appendingPathComponent("transcript.json")
-            let metaURL = dir.appendingPathComponent("meta.json")
-            for url in [transcriptURL, metaURL] where !fm.fileExists(atPath: url.path) {
-                try? fm.startDownloadingUbiquitousItem(at: url)
-            }
-            guard let transcript = readJSON(Transcript.self, at: transcriptURL) else { return nil }
-            return PublishedSession(
-                name: dir.lastPathComponent, manifest: readJSON(SessionManifest.self, at: metaURL),
-                transcript: transcript)
-        }
-    }
-
-    /// Debug builds can point at a local folder (`QUILL_LIBRARY_DIR`), since
-    /// the Simulator has no iCloud.
-    nonisolated private static var libraryOverride: URL? {
-        #if DEBUG
-            ProcessInfo.processInfo.environment["QUILL_LIBRARY_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-        #else
-            nil
-        #endif
     }
 
     nonisolated private static func localFolders() -> [URL] {
@@ -159,56 +277,22 @@ final class Library {
         return dirs.filter(SessionFolder.isFinished).sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
 
-    nonisolated private static func isSent(_ dir: URL) -> Bool {
-        FileManager.default.fileExists(atPath: dir.appendingPathComponent(sentMarker).path)
-    }
-
     nonisolated private static func readJSON<T: Decodable>(_ type: T.Type, at url: URL) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
 
+    /// Only recordings the hub has lose their audio here.
     private func pruneSentAudio() {
         let cutoff = Date().addingTimeInterval(-Self.keepAudio)
-        for dir in Self.localFolders() where Self.isSent(dir) {
+        for dir in Self.localFolders() {
             let started = SessionFolder.date(fromName: dir.lastPathComponent) ?? .distantFuture
-            if started < cutoff { try? FileManager.default.removeItem(at: dir) }
+            guard started < cutoff,
+                HubFolderPolicy.mayPruneAudio(
+                    name: dir.lastPathComponent, delivery: HubDelivery.read(in: dir),
+                    legacySent: HubDelivery.isLegacySent(dir), catalog: catalog)
+            else { continue }
+            try? FileManager.default.removeItem(at: dir)
         }
-    }
-}
-
-/// Hands finished sessions to the Mac: a copy of each folder goes into the
-/// app's iCloud container under Documents/Inbox, which iCloud Drive syncs to
-/// the Mac, where quill imports and transcribes it.
-enum Outbox {
-    static let containerID = "iCloud.com.eggdev.quill"
-
-    /// The names sent, or nil when iCloud isn't available to the app. Call
-    /// off the main thread.
-    nonisolated static func send(_ dirs: [URL]) -> [String]? {
-        let fm = FileManager.default
-        guard let container = fm.url(forUbiquityContainerIdentifier: containerID) else { return nil }
-        let inbox = container.appendingPathComponent("Documents/Inbox", isDirectory: true)
-        do {
-            try fm.createDirectory(at: inbox, withIntermediateDirectories: true)
-        } catch {
-            return nil
-        }
-        var sent: [String] = []
-        for dir in dirs {
-            let name = SessionFolder.unique(dir.lastPathComponent) {
-                fm.fileExists(atPath: inbox.appendingPathComponent($0).path)
-            }
-            // setUbiquitous moves its source, so hand it a copy.
-            let staging = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-            do {
-                try fm.copyItem(at: dir, to: staging)
-                try fm.setUbiquitous(true, itemAt: staging, destinationURL: inbox.appendingPathComponent(name))
-                sent.append(dir.lastPathComponent)
-            } catch {
-                try? fm.removeItem(at: staging)
-            }
-        }
-        return sent
     }
 }

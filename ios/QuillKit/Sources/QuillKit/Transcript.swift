@@ -56,3 +56,16 @@ public struct Transcript: Codable, Equatable, Sendable {
         }
     }
 }
+
+extension Transcript {
+    /// The hub serves transcript.json as the transcribing Mac wrote it; an
+    /// older or newer writer may leave out the header fields, which nothing
+    /// here depends on.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        engine = try c.decodeIfPresent(String.self, forKey: .engine) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        created_at = try c.decodeIfPresent(String.self, forKey: .created_at) ?? ""
+        segments = try c.decode([Segment].self, forKey: .segments)
+    }
+}
