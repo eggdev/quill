@@ -2,18 +2,27 @@
 
 ## Unreleased
 
+- Added the hub (ADR-004, `docs/hub-api.md`): one always-on Mac with
+  `hub.serve` keeps every recording, transcribes it, and serves an HTTP API on
+  `127.0.0.1` for `tailscale serve` to publish on the tailnet. A SQLite
+  catalog with a revision counter tells clients what changed; the session
+  folders stay the source of truth, and the catalog is rebuilt from them at
+  every start, including recordings made before the hub.
+- Added Mac clients (`hub.url`): a Mac uploads each finished recording to the
+  hub instead of transcribing it, waits for the transcript, and saves it next
+  to the audio. When the hub is unreachable, recordings wait on the Mac and
+  upload later. The menu shows upload progress. A Mac that becomes a client
+  also sends the recordings it transcribed itself, one at a time and after
+  any new recording, and takes the hub's transcript in their place.
+- `quill doctor` reports the hub role, the hub's catalog, and, on a client,
+  whether the hub answers.
 - Added Quill for iPhone (`ios/`): records the microphone from the Action
   Button with a Live Activity, pauses and resumes around phone calls as
-  separate segments, and sends each finished recording to the Mac through
-  iCloud.
-- The macOS app imports iPhone recordings from the app's iCloud folder into
-  the recordings folder and transcribes them (`inbox_dir`).
-- The iPhone app lists every transcript, the Mac's included, grouped by day
-  and searchable. Recordings made on the iPhone play back with the transcript:
-  tap a line to play from it. A live level meter shows the microphone while
-  recording.
-- The macOS app publishes transcripts (not audio) to the iPhone app's iCloud
-  folder, backfilling existing ones (`publish_transcripts`).
+  separate segments, and uploads each finished recording to the hub.
+- The iPhone app lists every transcript from the hub, the Mac's included,
+  grouped by day and searchable. Recordings made on the iPhone play back with
+  the transcript: tap a line to play from it. A live level meter shows the
+  microphone while recording.
 - Added `fixtures/sessions/iphone-room/` (`meta.json`, `transcript.json`), the
   session contract shared by the iPhone and the Mac.
 - Added calendar-driven recording on macOS: quill reads meetings from macOS

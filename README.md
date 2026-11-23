@@ -2,7 +2,7 @@
 
 # quill
 
-A fully local meeting recorder and transcriber. Quill records your mic and the call's audio as separate tracks, transcribes them on-device, and writes a timestamped `me` / `them` transcript. Nothing leaves the machine unless you set up your own [transcription server](server/README.md) for speaker labels.
+A fully local meeting recorder and transcriber. Quill records your mic and the call's audio as separate tracks, transcribes them on-device, and writes a timestamped `me` / `them` transcript. Nothing leaves your own devices: recordings go only to a [transcription server](server/README.md) or a hub Mac that you set up on your own network.
 
 ## 1. Install
 
@@ -23,6 +23,8 @@ Requires macOS 15+. Apple Silicon is recommended for transcription speed.
 To record meetings from your calendar, choose **Calendar meetings → Record automatically** (or **Ask when a meeting starts**) in the menu. A floating feather with live level bars stays on screen while quill records; click it to stop.
 
 See the [macOS documentation](macos/README.md) for configuration, the CLI, and troubleshooting.
+
+With several devices, one always-on Mac can be the hub: it keeps every recording and transcribes it, and your other Macs and Quill for iPhone upload to it and read transcripts back. See [Hub and clients](macos/README.md#hub-and-clients).
 
 ## 3. Platforms
 
