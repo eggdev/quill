@@ -1,4 +1,5 @@
 import Foundation
+import SystemConfiguration
 
 /// Optional user config at ~/.config/quill/config.json:
 ///
@@ -8,13 +9,19 @@ import Foundation
 ///       "mic_voice_processing": true,
 ///       "on_stop": "my-hook",
 ///       "calendar": { "mode": "auto", "require_video_link": true },
-///       "floating_indicator": true
+///       "floating_indicator": true,
+///       "hub": { "url": "https://<host>.<tailnet>.ts.net:8090", "device_name": "Work MacBook" }
 ///     }
 ///
 /// Resolution order for the recordings root: --out flag > config file >
 /// ~/Recordings. `on_stop` is a shell command spawned with the session
 /// directory as its argument — after the transcript is written, or right
 /// after recording when transcription is disabled.
+///
+/// `hub` (docs/hub-api.md, ADR-004): `"serve": true` makes this Mac the hub on
+/// 127.0.0.1:`port` (default 8090); otherwise a `url` makes it a client that
+/// uploads every recording there instead of transcribing it. `device_name`
+/// is what the hub calls this Mac. The role is read once at launch.
 enum Config {
     static let path = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/quill/config.json")
@@ -22,31 +29,11 @@ enum Config {
     static let defaultRoot = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Recordings", isDirectory: true)
 
+    /// Where quill keeps its own state: the device id and the hub catalog.
+    static let supportDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/quill", isDirectory: true)
+
     /// The configured recordings root, or nil if no config file / no key.
-    /// Where sessions recorded on the iPhone arrive: the iPhone app's iCloud
-    /// container, as iCloud Drive syncs it to this Mac. `inbox_dir` points
-    /// elsewhere; an empty string turns importing off.
-    static func inboxDir() -> URL? {
-        guard let dir = load()?["inbox_dir"] as? String else { return defaultInbox }
-        guard !dir.isEmpty else { return nil }
-        return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
-    }
-
-    /// Where transcripts are published for the iPhone to read: `Library`
-    /// beside the inbox. nil when importing is off, the iPhone app's folder
-    /// isn't on this Mac yet, or `publish_transcripts` is false.
-    static func libraryDir() -> URL? {
-        guard load()?["publish_transcripts"] as? Bool ?? true, let inbox = inboxDir() else { return nil }
-        let documents = inbox.deletingLastPathComponent()
-        // Never create the iCloud container ourselves; iCloud makes it once
-        // the iPhone app has used it.
-        guard FileManager.default.fileExists(atPath: documents.path) else { return nil }
-        return documents.appendingPathComponent("Library", isDirectory: true)
-    }
-
-    static let defaultInbox = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Mobile Documents/iCloud~com~eggdev~quill/Documents/Inbox", isDirectory: true)
-
     static func recordingsDir() -> URL? {
         guard let dir = load()?["recordings_dir"] as? String, !dir.isEmpty else { return nil }
         return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
@@ -152,6 +139,29 @@ enum Config {
         load()?["floating_indicator"] as? Bool ?? true
     }
 
+    /// What this Mac is in a hub setup. `hub.serve` wins over `hub.url`.
+    static func hubRole() -> HubRole {
+        let h = hub() ?? [:]
+        if h["serve"] as? Bool ?? false {
+            return .hub(port: h["port"] as? Int ?? HubRole.defaultPort)
+        }
+        if let raw = h["url"] as? String, let url = URL(string: raw), url.scheme != nil, url.host != nil {
+            return .client(url)
+        }
+        return .standalone
+    }
+
+    /// The name this Mac gives the hub: `hub.device_name`, else the
+    /// computer's name from System Settings → General → Sharing.
+    static func hubDeviceName() -> String {
+        if let name = hub()?["device_name"] as? String, !name.isEmpty { return name }
+        return (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? ProcessInfo.processInfo.hostName
+    }
+
+    private static func hub() -> [String: Any]? {
+        load()?["hub"] as? [String: Any]
+    }
+
     private static func calendar() -> [String: Any]? {
         load()?["calendar"] as? [String: Any]
     }
@@ -209,6 +219,17 @@ enum Config {
         }
         return recordingsDir() ?? defaultRoot
     }
+}
+
+enum HubRole: Equatable, Sendable {
+    /// Records and transcribes on its own.
+    case standalone
+    /// Keeps every recording, transcribes, and serves the hub API.
+    case hub(port: Int)
+    /// Uploads recordings to the hub at this URL and never transcribes.
+    case client(URL)
+
+    static let defaultPort = 8090
 }
 
 enum ConfigError: Error, CustomStringConvertible {

@@ -7,6 +7,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.0"),
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
     ],
     targets: [
         .executableTarget(
@@ -14,6 +16,8 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "GRDB", package: "GRDB.swift"),
             ],
             exclude: ["Info.plist"],
             linkerSettings: [

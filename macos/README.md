@@ -3,7 +3,8 @@
 A minimal, fully local macOS meeting recorder + transcriber. One menu-bar
 click records your mic and all system audio as two separate tracks; when you
 stop, quill transcribes both on-device and writes a speaker-tagged transcript.
-Nothing ever leaves the machine.
+Nothing leaves the machine unless you set up a transcription server or a hub
+on your own network.
 
 The macOS implementation is a single Swift binary with a menu-bar tray and no
 app bundle.
@@ -137,22 +138,80 @@ speaker-identification model. CAF on purpose: unlike m4a, it needs no
 finalization pass — if the process dies mid-meeting, everything already
 written is still readable.
 
-## iPhone recordings
+## Hub and clients
 
-Recordings made with [Quill for iPhone](../ios/README.md) arrive through
-iCloud Drive. quill checks the iPhone app's iCloud folder every 30 seconds,
-moves each finished recording into the recordings folder as
-`<yyyy.MM.dd-HHmm>-iphone/`, and transcribes it like a Mac recording (the
-`on_stop` hook runs too). A recording is moved only once every file in it has
-downloaded; moving it out of iCloud Drive frees the space there.
+One always-on Mac, such as a Mac mini, can be the **hub**. It keeps every
+recording, runs all transcription, and serves an HTTP API on your Tailscale
+network. Other devices are **clients**: a MacBook running quill, and
+[Quill for iPhone](../ios/README.md). A client uploads each finished recording
+to the hub and reads the transcript back. Clients never transcribe. The API is
+in [docs/hub-api.md](../docs/hub-api.md); the reasons are in
+[ADR-004](../docs/decisions/004-hub.md).
 
-Every transcript (Mac recordings included, and ones made before the iPhone app
-existed) is published back to the app's iCloud folder as `transcript.json` and
-`meta.json`, so the iPhone can list, search, and read them. Audio is not
-published. Set `"publish_transcripts": false` to keep transcripts on the Mac.
+On the hub:
 
-The Mac needs to be signed in to the same iCloud account with iCloud Drive
-on. The first import may ask for access to iCloud Drive.
+```json
+{
+  "transcription": { "engine": "remote", "url": "https://<gpu-host>.<tailnet>.ts.net:8091" },
+  "hub": { "serve": true, "port": 8090 }
+}
+```
+
+quill listens on `127.0.0.1:8090` only. Publish it to your tailnet with
+HTTPS, once:
+
+```sh
+tailscale serve --bg --https=8090 http://127.0.0.1:8090
+```
+
+The hub keeps a catalog of sessions in
+`~/Library/Application Support/quill/hub.sqlite`. The session folders stay the
+source of truth: each has a `.hub.json` file that says which device sent it,
+and quill rebuilds the catalog from the folders at every start. Recordings
+already in the folder, and ones made on the hub Mac itself, join the catalog
+too. Uploads wait in `<recordings>/.incoming/` until the client commits them;
+the session then gets its own folder, named after the client's folder plus a
+short device tag, such as `2026.11.21-0930-macbook-pro`. Uploads never
+committed are deleted after 7 days. The hub runs its own `on_stop` hook for
+every session it transcribes, including ones uploaded by clients. Deleting
+`hub.sqlite` is safe: the hub rebuilds it with a new catalog id, and clients
+notice the new id and read the list again from the start.
+
+On a client Mac:
+
+```json
+{
+  "hub": { "url": "https://<host>.<tailnet>.ts.net:8090", "device_name": "Work MacBook" }
+}
+```
+
+When a recording stops, the client uploads its audio and `meta.json` to the
+hub, then checks every 15 seconds until the hub has transcribed it. It then
+saves `transcript.json` and `transcript.md` in the session folder, shows the
+"transcript ready" notification, and runs the `on_stop` hook. The client keeps
+its copy of the audio. The menu shows the progress: "uploading…", "transcribing
+on hub", or "waiting for hub".
+
+If the hub can't be reached, the recording stays on the client and quill tries
+again after 15 seconds, then waits twice as long each time, up to 5 minutes.
+It also tries again when the next recording stops, and at every launch. A
+client never falls back to transcribing locally. If the hub refuses a
+recording, the client writes why in the session's `transcribe.log` and does
+not send it again. If the hub fails to transcribe it, the client writes the
+hub's error to `transcribe.log` and notifies once, then checks again every
+10 minutes: the hub retries failed sessions when it restarts, and the
+transcript arrives normally if that works. `quill doctor` on a client checks
+that the hub answers.
+
+When a Mac becomes a client, it also sends the recordings it already
+transcribed itself, oldest first and one at a time, only while no new
+recording waits; the hub's transcript then replaces the local one quietly,
+with no notification and no `on_stop` hook. Folders ending in `-iphone` (or
+`-iphone-2`) are skipped: they came from the iPhone, which sends them itself.
+
+On the hub, `transcription.enabled` must stay on; `quill doctor` fails the
+`hub` check otherwise. A Mac with neither key set works on its own, as before. The role is read at
+launch; restart quill after changing it.
 
 ## Capture recovery
 
@@ -222,7 +281,8 @@ Optional, at `~/.config/quill/config.json`:
     "adhoc_calls": "ask",
     "browser_calls": false
   },
-  "floating_indicator": true
+  "floating_indicator": true,
+  "hub": { "url": "https://<host>.<tailnet>.ts.net:8090" }
 }
 ```
 
@@ -260,20 +320,23 @@ Optional, at `~/.config/quill/config.json`:
   (default `false`).
 - `floating_indicator` — show the floating recording indicator (default
   `true`).
-- `inbox_dir` — where iPhone recordings arrive (default: the iPhone app's
-  iCloud container, `~/Library/Mobile Documents/iCloud~com~eggdev~quill/Documents/Inbox`).
-  An empty string turns importing off.
-- `publish_transcripts` — copy transcripts to iCloud for the iPhone app to
-  read (default `true`).
+- `hub.serve` — `true` makes this Mac the hub (default `false`). See
+  [Hub and clients](#hub-and-clients).
+- `hub.port` — the hub's port on `127.0.0.1` (default `8090`).
+- `hub.url` — the hub's address; this Mac then uploads every recording there
+  instead of transcribing it. Ignored when `hub.serve` is `true`.
+- `hub.device_name` — the name the hub shows for this Mac (default: the
+  computer's name).
 
-Config changes apply within a few seconds; no restart needed.
+Config changes apply within a few seconds; no restart needed, except for the
+`hub` keys, which are read at launch.
 
 ## CLI
 
 ```sh
 quill                        # run the menu-bar daemon (^C to quit)
 quill run --out <dir>        # custom recordings root (default ~/Recordings)
-quill doctor                 # check permissions, recordings folder, models, calendar
+quill doctor                 # check permissions, recordings folder, models, calendar, hub
 quill install --launch-at-login
 quill install --uninstall
 ```
@@ -286,6 +349,8 @@ quill install --uninstall
 - **AVAudioEngine** — mic capture
 - **AVAudioFile** — streaming AAC encode into CAF
 - **FluidAudio / Parakeet** — on-device Core ML transcription
+- **Hummingbird 2** — the hub's HTTP server
+- **GRDB** — the hub's SQLite catalog
 - **EventKit** — calendar meetings, read from the local calendar database
 - **Core Audio process objects** (`kAudioHardwarePropertyProcessObjectList`,
   `kAudioProcessPropertyIsRunningInput`) — which meeting apps hold the mic

@@ -14,6 +14,14 @@ actor TranscriptionCoordinator {
         case failed(session: String)
     }
 
+    /// One session's progress, for the hub catalog.
+    enum Event: Sendable {
+        case started(URL)
+        case finished(URL)
+        /// `reason` is one line, fit for a status field.
+        case failed(URL, reason: String)
+    }
+
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
@@ -22,16 +30,31 @@ actor TranscriptionCoordinator {
     private var remoteDown = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
+    private var eventHandler: (@Sendable (Event) async -> Void)?
+    private var notifies: @Sendable (URL) -> Bool = { _ in true }
 
     func setStatusHandler(_ handler: @escaping @Sendable (Status) -> Void) {
         statusHandler = handler
+    }
+
+    /// Awaited before the coordinator moves on, so the catalog sees
+    /// `started` before `finished` for every session.
+    func setEventHandler(_ handler: @escaping @Sendable (Event) async -> Void) {
+        eventHandler = handler
+    }
+
+    /// Which sessions get a "transcript ready" or "transcription failed"
+    /// notification. The hub turns them off for sessions a client uploaded:
+    /// the client tells its own user.
+    func setNotificationFilter(_ predicate: @escaping @Sendable (URL) -> Bool) {
+        notifies = predicate
     }
 
     /// Queue a finished session. With transcription disabled in config, the
     /// on_stop hook still fires — it just gets an untranscribed folder.
     func enqueue(_ sessionDir: URL) {
         guard Config.transcriptionEnabled() else {
-            runHook(for: sessionDir)
+            OnStopHook.run(for: sessionDir)
             return
         }
         queue.append(sessionDir)
@@ -40,12 +63,13 @@ actor TranscriptionCoordinator {
 
     /// Scan the recordings root for sessions that finished (meta.json exists)
     /// but were never transcribed. Folder names sort chronologically, so
-    /// oldest-first is a name sort.
+    /// oldest-first is a name sort. Hidden folders are skipped: the hub stages
+    /// uploads in `.incoming`.
     func resumePending(root: URL) {
         guard Config.transcriptionEnabled() else { return }
         guard
             let entries = try? FileManager.default.contentsOfDirectory(
-                at: root, includingPropertiesForKeys: nil
+                at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
             )
         else { return }
 
@@ -82,6 +106,7 @@ actor TranscriptionCoordinator {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
+            await eventHandler?(.started(dir))
             do {
                 let meeting = SessionMeta.meeting(in: dir)
                 do {
@@ -94,16 +119,21 @@ actor TranscriptionCoordinator {
                     remoteDown = true
                     try await transcribe(dir, meeting: meeting)
                 }
-                let name = meeting?.title ?? dir.lastPathComponent
-                notifyUser(title: "quill — transcript ready", body: name)
-                runHook(for: dir)
+                await eventHandler?(.finished(dir))
+                if notifies(dir) {
+                    notifyUser(title: "quill — transcript ready", body: meeting?.title ?? dir.lastPathComponent)
+                }
+                OnStopHook.run(for: dir)
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
-                notifyUser(
-                    title: "quill — transcription failed",
-                    body: "\(dir.lastPathComponent) — see transcribe.log"
-                )
+                await eventHandler?(.failed(dir, reason: Self.oneLine("\(error)")))
+                if notifies(dir) {
+                    notifyUser(
+                        title: "quill — transcription failed",
+                        body: "\(dir.lastPathComponent) — see transcribe.log"
+                    )
+                }
             }
         }
         await engine?.release()
@@ -214,31 +244,14 @@ actor TranscriptionCoordinator {
         return engine
     }
 
-    /// Fires the configured on_stop shell command with the session directory
-    /// as its sole argument, after the transcript exists (or immediately after
-    /// recording when transcription is disabled).
-    private func runHook(for dir: URL) {
-        guard let cmd = Config.onStop() else { return }
-        let task = Process()
-        task.launchPath = "/bin/sh"
-        task.arguments = ["-c", "\(cmd) \"$0\"", dir.path]
-        do {
-            try task.run()
-        } catch {
-            log(dir, "on_stop hook failed to launch: \(error)")
-        }
+    private func log(_ dir: URL, _ message: String) {
+        SessionLog.append(dir, message)
     }
 
-    private func log(_ dir: URL, _ message: String) {
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
-        let url = dir.appendingPathComponent("transcribe.log")
-        if let handle = FileHandle(forWritingAtPath: url.path) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? Data(line.utf8).write(to: url)
-        }
+    /// First line of an error description, at most 300 characters.
+    static func oneLine(_ text: String) -> String {
+        let first = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return String(first.prefix(300))
     }
 
     private func publish(_ status: Status) {
