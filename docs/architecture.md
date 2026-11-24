@@ -1,6 +1,6 @@
 # Quill architecture
 
-Last updated: `2026.08.04`
+Last updated: `2026.11.21`
 
 Quill is one product with separate native implementations for each supported
 desktop platform. Platform code does not share a runtime or source language.
@@ -27,8 +27,9 @@ Quill product
 
 | Path | Responsibility |
 |---|---|
-| `macos/` | Complete native macOS implementation and Swift package |
-| `ios/` | iPhone capture companion: records and hands sessions to the Mac ([ADR-002](decisions/002-ios-capture-companion.md)) |
+| `macos/` | Complete native macOS implementation and Swift package; also the hub and its Mac client ([ADR-004](decisions/004-hub.md)) |
+| `ios/` | iPhone capture companion: records and uploads sessions to the hub ([ADR-002](decisions/002-ios-capture-companion.md), [ADR-004](decisions/004-hub.md)) |
+| `server/` | Optional transcription and speaker labels on a GPU host on the user's network ([ADR-003](decisions/003-remote-transcription-server.md)) |
 | `windows/` | Native Windows implementation and platform documentation |
 | `linux/` | Native Linux implementation boundary and platform documentation |
 | `docs/` | Current architecture and historical decisions |
@@ -47,7 +48,7 @@ The platforms share these concepts even when their audio containers differ:
 - canonical, timed, speaker-tagged `transcript.json`;
 - readable `transcript.md` generated from the canonical transcript;
 - a recoverable filesystem-backed transcription queue; and
-- local-only recording and inference.
+- recording and inference only on machines the user owns.
 
 ### Session metadata v2
 
@@ -98,6 +99,27 @@ implemented in `macos/Sources/quill/SessionMeta.swift`,
 `macos/Sources/quill/Transcription/TranscriptionCoordinator.swift` is the
 reference behavior, with schema tests in `macos/Tests/QuillTests/`.
 
+## Hub and clients
+
+With more than one device, one always-on Mac is the **hub**
+([ADR-004](decisions/004-hub.md)). It runs the macOS binary with
+`hub.serve`, keeps every recording, runs all transcription through the
+normal transcription queue, and serves the [hub API](hub-api.md) on the
+user's Tailscale network. The API document is the contract between the hub
+and its clients; change it before changing either side.
+
+The other devices are **clients**: a Mac running the macOS binary with
+`hub.url`, and the iPhone app. A client uploads each finished session (its
+segment files, then a commit carrying `meta.json`) and reads sessions and
+transcripts back. A client never transcribes; when the hub can't be reached,
+it keeps the session and tries again later.
+
+On the hub, the session folders stay the source of truth. Each folder holds a
+`.hub.json` file with the session id and the device that sent it. The SQLite
+catalog (`hub.sqlite`) is an index of the folders that the hub rebuilds at
+every start; a hub-wide revision counter tells clients what changed. A Mac
+with neither key set works alone, as before.
+
 ## Build and release boundaries
 
 Each platform owns its build graph, dependencies, tests, packaging, and release
@@ -112,3 +134,6 @@ portable executable.
 | Decision | Status | Summary |
 |---|---|---|
 | [ADR-001](decisions/001-multiplatform-repository.md) | Active | Keep native platform implementations in one repository under symmetric platform roots. |
+| [ADR-002](decisions/002-ios-capture-companion.md) | Active, hand-off replaced by ADR-004 | An iPhone app records the microphone; the Mac transcribes and keeps every recording. |
+| [ADR-003](decisions/003-remote-transcription-server.md) | Active | Optional Nemotron transcription with speaker labels on a GPU host on the user's network. |
+| [ADR-004](decisions/004-hub.md) | Active | One always-on hub Mac keeps every recording, transcribes, and serves an HTTP API over Tailscale; other devices upload and read. |

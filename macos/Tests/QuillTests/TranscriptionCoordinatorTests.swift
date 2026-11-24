@@ -19,6 +19,71 @@ final class TranscriptionCoordinatorTests: XCTestCase {
             ])
     }
 
+    func testShiftedLabelsDiarizedVoicesWithinTheTrack() {
+        let raw = [
+            TranscriptSegment(start: 0, end: 1, text: "hi", speaker: 0),
+            TranscriptSegment(start: 1, end: 2, text: "hey", speaker: 1),
+            TranscriptSegment(start: 2, end: 3, text: "so"),
+        ]
+        XCTAssertEqual(
+            Transcript.shifted(raw, speaker: "room", offsetMs: 0).map(\.speaker),
+            ["speaker 1", "speaker 2", "room"])
+        XCTAssertEqual(
+            Transcript.shifted(raw, speaker: "them", offsetMs: 0).map(\.speaker),
+            ["them 1", "them 2", "them"])
+    }
+
+    func testRemoteResponseDecodesOneResultPerFile() throws {
+        let body = Data(
+            """
+            {"engine": "nemo", "model": "m",
+             "files": [{"duration": 3.5,
+                        "segments": [{"start": 0.16, "end": 1.2, "text": "Alright.", "speaker": 1},
+                                     {"start": 1.9, "end": 2.1, "text": "Okay.", "speaker": null}]},
+                       {"duration": 1.0, "segments": []}]}
+            """.utf8)
+        let files = try RemoteEngine.segments(from: body, base: URL(string: "http://spark:8091")!)
+        XCTAssertEqual(files.count, 2)
+        XCTAssertEqual(files[0].map(\.text), ["Alright.", "Okay."])
+        XCTAssertEqual(files[0].map(\.speaker), [1, nil])
+        XCTAssertEqual(files[0][0].start, 0.16)
+        XCTAssertTrue(files[1].isEmpty)
+    }
+
+    func testTracksGroupConsecutiveSegmentFiles() {
+        let inputs = [
+            SessionMeta.TrackInput(file: "mic.caf", speaker: "me", offsetMs: 0),
+            SessionMeta.TrackInput(file: "mic-2.caf", speaker: "me", offsetMs: 25000),
+            SessionMeta.TrackInput(file: "system.caf", speaker: "them", offsetMs: 0),
+        ]
+        XCTAssertEqual(
+            TranscriptionCoordinator.tracks(inputs).map { $0.map(\.file) },
+            [["mic.caf", "mic-2.caf"], ["system.caf"]])
+    }
+
+    func testMultipartCarriesEachFileInOrder() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.caf")
+        let b = dir.appendingPathComponent("b.caf")
+        try Data("AAA".utf8).write(to: a)
+        try Data("BBB".utf8).write(to: b)
+        let body = String(decoding: try RemoteEngine.multipart([a, b], boundary: "x"), as: UTF8.self)
+        XCTAssertEqual(
+            body,
+            "--x\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"a.caf\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\nAAA\r\n"
+                + "--x\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"b.caf\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\nBBB\r\n--x--\r\n")
+    }
+
+    func testRemoteGarbageIsUnreachable() {
+        XCTAssertThrowsError(try RemoteEngine.segments(from: Data("<html>".utf8), base: URL(string: "http://x")!)) {
+            guard case RemoteEngine.EngineError.unreachable = $0 else { return XCTFail("\($0)") }
+        }
+    }
+
     func testMergeInterleavesSegmentsAndRetainsGap() {
         // First mic segment ends at 10 s; the second starts at 25 s after a
         // 15 s capture gap. The system track spans the whole session.

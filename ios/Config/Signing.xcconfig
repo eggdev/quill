@@ -1,0 +1,13 @@
+// Signing settings for every target.
+//
+// Your Apple Developer team is not in git. Put it in Config/Local.xcconfig:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//
+// Xcode shows the team ID under Settings > Accounts, and
+// developer.apple.com shows it under Membership details.
+// scripts/install-ios writes this file for you when it can find the team.
+
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

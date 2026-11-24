@@ -5,6 +5,7 @@ import UIKit
 struct RecordingView: View {
     let recorder: Recorder
     @State private var query = ""
+    @State private var showingSettings = false
     @Environment(\.scenePhase) private var scenePhase
 
     private var library: Library { recorder.library }
@@ -23,8 +24,8 @@ struct RecordingView: View {
                         .listRowBackground(Color.clear)
                         .listRowInsets(EdgeInsets())
                 } footer: {
-                    if !library.iCloudAvailable {
-                        Text("Sign in to iCloud to send recordings to your Mac. They stay here until then.")
+                    if library.hubState == .unreachable {
+                        Text("Can't reach your hub. Recordings wait here and send when it's back. Check that Tailscale is connected.")
                             .frame(maxWidth: .infinity)
                             .multilineTextAlignment(.center)
                     }
@@ -32,6 +33,10 @@ struct RecordingView: View {
 
                 if let problem = recorder.problem {
                     Section { ProblemRow(problem: problem) }
+                }
+
+                if library.hubState == .notSet {
+                    Section { HubPromptRow { showingSettings = true } }
                 }
 
                 if library.loaded && library.recordings.isEmpty {
@@ -47,20 +52,32 @@ struct RecordingView: View {
                     Section(group.title) {
                         ForEach(group.recordings) { recording in
                             NavigationLink(value: recording) {
-                                RecordingRow(recording: recording, iCloudAvailable: library.iCloudAvailable)
+                                RecordingRow(recording: recording, hubState: library.hubState)
                             }
                         }
                     }
                 }
             }
             .navigationTitle("Quill")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingSettings) {
+                HubSettingsView(library: library)
+            }
             .searchable(text: $query, prompt: "Search transcripts")
             .navigationDestination(for: RecordingSummary.self) { recording in
                 RecordingDetailView(recording: recording, library: library)
             }
             .refreshable { await library.refresh() }
             .task(id: scenePhase) {
-                // Transcripts arrive from the Mac whenever it gets to them;
+                // Transcripts arrive from the hub whenever it gets to them;
                 // look again every 20 s while the app is open.
                 guard scenePhase == .active else { return }
                 while !Task.isCancelled {
@@ -202,7 +219,7 @@ private struct PressScale: ButtonStyle {
 
 private struct RecordingRow: View {
     let recording: RecordingSummary
-    let iCloudAvailable: Bool
+    let hubState: Library.HubState
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -211,7 +228,7 @@ private struct RecordingRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 34, height: 34)
                 .background(.fill.tertiary, in: Circle())
-                .accessibilityLabel(recording.source == .iphone ? "Recorded on iPhone" : "Recorded on Mac")
+                .accessibilityLabel("Recorded on \(recording.deviceDescription)")
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -237,9 +254,15 @@ private struct RecordingRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         case .transcribing:
-            status("Transcribing on your Mac", symbol: "waveform")
+            status("Transcribing on your hub", symbol: "waveform")
+        case .failed:
+            status("Transcription failed", symbol: "exclamationmark.triangle")
         case .waiting:
-            status(iCloudAvailable ? "Sending to your Mac" : "Waiting for iCloud", symbol: "icloud.and.arrow.up")
+            switch hubState {
+            case .notSet: status("Waiting for a hub address", symbol: "tray.and.arrow.up")
+            case .unreachable: status("Waiting for your hub", symbol: "tray.and.arrow.up")
+            case .unknown, .reachable: status("Sending to your hub", symbol: "arrow.up.circle")
+            }
         }
     }
 
@@ -259,6 +282,25 @@ private struct EmptyLibraryRow: View {
             Text("Record from the Action Button: Settings › Action Button › Shortcut › Quill.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+/// Shown until a hub address is saved: without one, nothing is sent or
+/// transcribed.
+private struct HubPromptRow: View {
+    let openSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Connect to your hub")
+                .font(.headline)
+            Text("Add your hub's address to send recordings for transcription and see all your transcripts.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Button("Add Hub Address", action: openSettings)
+                .padding(.top, 2)
         }
         .padding(.vertical, 6)
     }

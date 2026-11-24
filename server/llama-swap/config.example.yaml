@@ -1,0 +1,26 @@
+# llama-swap config for a GPU host that quill shares with other models.
+# llama-swap starts Nemotron when the quill server sends its first request,
+# and stops it after `ttl` seconds without one.
+#
+#   llama-swap --config ~/.config/llama-swap/config.yaml --listen 127.0.0.1:8092
+
+# vLLM needs several minutes to load the model. Requests wait this long.
+healthCheckTimeout: 900
+# The quill server sends up to one hour of audio in one request.
+maxRequestBodyMB: 250
+
+models:
+  nemotron-transcribe:
+    name: Nemotron 3.5 Transcribe (quill)
+    # The quill server asks for the model by this name.
+    aliases:
+      - nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B-FP8
+    cmd: ${env.HOME}/.config/llama-swap/models/nemotron-transcribe.sh
+    env:
+      - PORT=18092
+      # Share of GPU memory. On a DGX Spark the GPU and CPU share one pool.
+      - GPU_UTIL=0.33
+    proxy: http://127.0.0.1:18092
+    checkEndpoint: /health
+    # Seconds without a request before llama-swap stops the model.
+    ttl: 900

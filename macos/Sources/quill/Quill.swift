@@ -67,7 +67,10 @@ struct Doctor: ParsableCommand {
     )
 
     func run() throws {
-        let checks = DoctorReport.run(recordingsRoot: Config.resolveRoot(cliOverride: nil))
+        var checks = DoctorReport.run(recordingsRoot: Config.resolveRoot(cliOverride: nil))
+        checks.append(DoctorReport.checkHub())
+        if let server = DoctorReport.checkRemoteServer() { checks.append(server) }
+        if let hub = DoctorReport.checkHubServer() { checks.append(hub) }
         DoctorReport.print(checks)
         if !DoctorReport.allOK(checks) {
             throw ExitCode(1)
@@ -96,8 +99,10 @@ final class AppController {
     private var meetingsFetchedAt = Date.distantPast
     private var reloadPending = false
     private var calendarTimer: Timer?
-    private var inboxTimer: Timer?
-    private let inboxQueue = DispatchQueue(label: "quill.inbox")
+    /// Read once at launch; a role change needs a restart.
+    private let role = Config.hubRole()
+    private var hub: HubService?
+    private var uploader: HubUploader?
     private var requestedCalendarAccess = false
     /// "Hide until next recording" from the indicator's menu.
     private var indicatorSuppressed = false
@@ -117,15 +122,31 @@ final class AppController {
         calendar.onChange = { [weak self] in self?.scheduleReload() }
         micUsage.onChange = { [weak self] in self?.calendarTick() }
 
-        Task { [weak controller = self, transcription, root] in
+        Task { [weak controller = self, transcription, root, role] in
             await transcription.setStatusHandler { status in
-                Task { @MainActor [weak self] in
-                    self?.showTranscription(status)
+                Task { @MainActor in
+                    controller?.showTranscription(status)
                 }
             }
-            await transcription.resumePending(root: root)
-            // After the rescan, so an imported session is queued only once.
-            await controller?.startInboxImports()
+            switch role {
+            case .standalone:
+                await transcription.resumePending(root: root)
+            case .hub(let port):
+                let hub = await HubSetup.startHub(root: root, port: port, transcription: transcription)
+                controller?.hub = hub
+            case .client:
+                // The uploader replaces the transcription queue.
+                break
+            }
+        }
+        if case .client(let url) = role, let uploader = HubSetup.makeUploader(root: root, hub: url) {
+            self.uploader = uploader
+            Task { [weak controller = self] in
+                await uploader.setStatusHandler { status in
+                    Task { @MainActor in controller?.showUpload(status) }
+                }
+                await uploader.start()
+            }
         }
 
         // A meeting can start at any moment; a 2 s pass over the cached
@@ -142,7 +163,6 @@ final class AppController {
     /// Stop any live session cleanly (finalizing files) and exit.
     func shutdown() {
         calendarTimer?.invalidate()
-        inboxTimer?.invalidate()
         stopSession()
         NSApp.terminate(nil)
     }
@@ -234,7 +254,16 @@ final class AppController {
             )
         }
         let dir = session.dir
-        Task { [transcription] in await transcription.enqueue(dir) }
+        switch role {
+        case .client:
+            Task { [uploader] in await uploader?.enqueue(dir) }
+        case .hub, .standalone:
+            Task { [transcription, hub] in
+                // Into the catalog now, so clients see it while it waits.
+                _ = try? await hub?.index(dir)
+                await transcription.enqueue(dir)
+            }
+        }
     }
 
     /// Rebuild the menu presentation from capture status plus elapsed time.
@@ -266,6 +295,21 @@ final class AppController {
             )
         case .failed(let name):
             menuBar.updateTranscription("transcription failed · \(name)")
+        }
+    }
+
+    private func showUpload(_ status: HubUploader.Status) {
+        switch status {
+        case .idle:
+            menuBar.updateTranscription(nil)
+        case .uploading(let name, let queued):
+            menuBar.updateTranscription(queued > 0 ? "uploading \(name) · \(queued) queued" : "uploading \(name)")
+        case .waitingForHub(let pending):
+            menuBar.updateTranscription("waiting for hub · \(pending) to send")
+        case .transcribingOnHub(let sessions):
+            menuBar.updateTranscription(sessions > 1 ? "transcribing on hub · \(sessions) sessions" : "transcribing on hub")
+        case .failed(let name):
+            menuBar.updateTranscription("hub transcription failed · \(name)")
         }
     }
 
@@ -319,7 +363,12 @@ final class AppController {
         case .stop(let reason)?:
             let title = sessionTitle ?? "recording"
             stopSession()
-            let next = Config.transcriptionEnabled() ? " · transcribing now." : "."
+            let next: String
+            if case .client = role {
+                next = " · sending to the hub."
+            } else {
+                next = Config.transcriptionEnabled() ? " · transcribing now." : "."
+            }
             notifyUser(title: "quill — stopped “\(title)”", body: reason.label.capitalizedFirst + next)
         case .retitle(let origin)?:
             session?.meeting = origin.meeting.map(Self.metaMeeting)
@@ -387,38 +436,6 @@ final class AppController {
             }
         }
         menuBar.updateCalendar(mode: mode, detail: detail)
-    }
-
-    // MARK: - iPhone recordings
-
-    /// iPhone sessions arrive through iCloud Drive; checking the inbox every
-    /// 30 s is plenty for something that is transcribed afterwards anyway.
-    private func startInboxImports() {
-        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.importFromPhone() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        inboxTimer = timer
-        importFromPhone()
-    }
-
-    /// Off the main thread: move finished iPhone sessions into the recordings
-    /// root and queue each for transcription like a session recorded here,
-    /// then publish any new transcripts back for the iPhone to read.
-    private func importFromPhone() {
-        guard let inbox = Config.inboxDir() else { return }
-        let library = Config.libraryDir()
-        inboxQueue.async { [root, transcription] in
-            for dir in InboxImporter(inbox: inbox, root: root).importReady() {
-                FileHandle.standardError.write(Data("↓ imported \(dir.lastPathComponent) from iPhone\n".utf8))
-                Task { await transcription.enqueue(dir) }
-            }
-            guard let library else { return }
-            let published = TranscriptPublisher(root: root, library: library).publish()
-            if !published.isEmpty {
-                FileHandle.standardError.write(Data("↑ published \(published.count) transcript(s) to iPhone\n".utf8))
-            }
-        }
     }
 
     // MARK: - Floating indicator

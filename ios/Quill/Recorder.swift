@@ -5,7 +5,7 @@ import Observation
 import QuillKit
 import UIKit
 
-/// Records the microphone into a session folder the Mac can transcribe. There
+/// Records the microphone into a session folder the hub can transcribe. There
 /// is one recorder: the screen, the Action Button intent, and the Live
 /// Activity's Stop button all drive this instance.
 ///
@@ -129,7 +129,7 @@ final class Recorder {
     }
 
     /// The app came to the foreground: retry a resume the system refused,
-    /// and send anything still waiting for iCloud.
+    /// and send anything still waiting for the hub.
     func becameActive() async {
         // Back from Settings with the microphone allowed.
         if problem == .micDenied, AVAudioApplication.shared.recordPermission == .granted { problem = nil }

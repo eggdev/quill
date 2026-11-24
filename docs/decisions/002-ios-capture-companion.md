@@ -2,6 +2,11 @@
 
 Last updated: `2026.10.26`
 
+> **Superseded in part by [ADR-004](004-hub.md) (`2026.11.21`).** The iCloud
+> hand-off below is replaced: the iPhone now uploads each recording to the
+> hub Mac and reads transcripts from it over the hub API. The rest of this
+> record stands as written.
+
 > Add an `ios/` platform root for an iPhone app that records the microphone
 > and hands each finished session to the Mac through iCloud. The iPhone
 > records; the Mac transcribes and keeps every recording in one place.

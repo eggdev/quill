@@ -51,56 +51,118 @@ final class RecordingSummaryTests: XCTestCase {
     private var manifest: SessionManifest!
     private var transcript: Transcript!
 
+    private let folder = "2026.10.26-1530-iphone"
+    private let phone = HubDevice(id: "PHONE", name: "iPhone", kind: "iphone")
+    private let mac = HubDevice(id: "MAC", name: "MacBook Pro", kind: "mac")
+
     override func setUpWithError() throws {
         manifest = try fixture(SessionManifest.self, "meta.json")
         transcript = try fixture(Transcript.self, "transcript.json")
     }
 
-    func testLocalSessionMovesThroughItsStages() {
-        let name = "2026.10.26-1530-iphone"
-        func stage(sent: Bool, published: Bool) -> RecordingSummary.Stage? {
-            RecordingSummary.merge(
-                local: [LocalSession(name: name, manifest: manifest, sent: sent)],
-                published: published ? [PublishedSession(name: name, manifest: manifest, transcript: transcript)] : []
-            ).first?.stage
-        }
-        XCTAssertEqual(stage(sent: false, published: false), .waiting)
-        XCTAssertEqual(stage(sent: true, published: false), .transcribing)
-        XCTAssertEqual(stage(sent: true, published: true), .transcribed)
+    private func hub(
+        id: String, name: String, device: HubDevice, status: HubSession.Status = .transcribed,
+        error: String? = nil, preview: String = "", title: String? = nil, started: String = "2026-10-26T15:30:00Z"
+    ) -> HubSession {
+        HubSession(
+            id: id, name: name, device: device, title: title, started: started, durationSeconds: 1205,
+            status: status, error: error, preview: preview, revision: 7)
     }
 
-    func testLocalAndPublishedCopiesAreOneRowWithAudio() {
-        let name = "2026.10.26-1530-iphone"
+    private func delivery(_ id: String, committed: Bool = false, rejected: String? = nil) -> HubDelivery {
+        var d = HubDelivery(id: id)
+        d.committed = committed
+        d.rejected = rejected
+        return d
+    }
+
+    func testLocalSessionMovesThroughItsStages() {
+        func row(_ d: HubDelivery?, legacy: Bool = false, hub sessions: [HubSession] = []) -> RecordingSummary? {
+            RecordingSummary.merge(
+                local: [LocalSession(name: folder, manifest: manifest, delivery: d, legacySent: legacy)], hub: sessions
+            ).first
+        }
+        XCTAssertEqual(row(nil)?.stage, .waiting)
+        XCTAssertEqual(row(delivery("A"))?.stage, .waiting)
+        XCTAssertEqual(row(delivery("A", committed: true))?.stage, .transcribing)
+        XCTAssertEqual(row(nil, legacy: true)?.stage, .transcribing)
+        // An old iCloud folder the hub turned out not to have is sending again.
+        XCTAssertEqual(row(delivery("A"), legacy: true)?.stage, .waiting)
+        XCTAssertEqual(row(delivery("A"), hub: [hub(id: "A", name: folder, device: phone, status: .queued)])?.stage, .transcribing)
+        XCTAssertEqual(row(delivery("A"), hub: [hub(id: "A", name: folder, device: phone, status: .transcribing)])?.stage, .transcribing)
+        XCTAssertEqual(row(delivery("A"), hub: [hub(id: "A", name: folder, device: phone)])?.stage, .transcribed)
+
+        let failed = row(delivery("A"), hub: [hub(id: "A", name: folder, device: phone, status: .failed, error: "model crashed")])
+        XCTAssertEqual(failed?.stage, .failed)
+        XCTAssertEqual(failed?.failure, "model crashed")
+
+        let refused = row(delivery("A", rejected: "bad meta"))
+        XCTAssertEqual(refused?.stage, .failed)
+        XCTAssertEqual(refused?.failure, "bad meta")
+    }
+
+    func testLocalFolderAndHubSessionAreOneRowWithAudio() {
         let rows = RecordingSummary.merge(
-            local: [LocalSession(name: name, manifest: manifest, sent: true)],
-            published: [PublishedSession(name: name, manifest: manifest, transcript: transcript)])
+            local: [LocalSession(name: folder, manifest: manifest, delivery: delivery("A", committed: true))],
+            hub: [hub(id: "A", name: "\(folder)-2", device: phone, preview: "Okay, let's start")],
+            transcripts: ["A": transcript.fullText], thisDevice: "PHONE")
         XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].id, "A")
+        XCTAssertEqual(rows[0].name, folder)  // the local folder, for its audio
         XCTAssertTrue(rows[0].hasAudio)
         XCTAssertEqual(rows[0].source, .iphone)
+        XCTAssertNil(rows[0].deviceName)
+        XCTAssertEqual(rows[0].revision, 7)
         XCTAssertEqual(rows[0].durationSeconds, 1205)
         XCTAssertTrue(rows[0].searchText.contains("punch list"))
     }
 
-    func testMacSessionUsesMeetingTitleOrFolderDate() throws {
-        let macMeta = """
-            {"schema_version":2,"started":"2026-10-20T14:00:00Z","ended":"2026-10-20T14:30:00Z",
-             "duration_seconds":1800,"status":"complete","tracks":[],
-             "meeting":{"title":"Weekly sync","calendar":"Work","scheduled_start":"x","scheduled_end":"y"}}
-            """
-        let withMeeting = try JSONDecoder().decode(SessionManifest.self, from: Data(macMeta.utf8))
+    func testFolderWithAnIDNeverJoinsByName() {
+        let rows = RecordingSummary.merge(
+            local: [LocalSession(name: folder, manifest: manifest, delivery: delivery("A"))],
+            hub: [hub(id: "B", name: folder, device: phone)])
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(Set(rows.map(\.id)), ["A", "B"])
+    }
+
+    func testOldFolderWithoutAnIDJoinsByName() {
+        let rows = RecordingSummary.merge(
+            local: [LocalSession(name: folder, manifest: manifest, legacySent: true)],
+            hub: [hub(id: "B", name: folder, device: phone)])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].id, "B")
+        XCTAssertEqual(rows[0].stage, .transcribed)
+        XCTAssertTrue(rows[0].hasAudio)
+    }
+
+    func testHubSessionsFromOtherDevices() {
         let rows = RecordingSummary.merge(
             local: [],
-            published: [
-                PublishedSession(name: "2026.10.20-0900", manifest: withMeeting, transcript: transcript),
-                PublishedSession(name: "2026.08.01-1015", manifest: nil, transcript: transcript),
-            ])
+            hub: [
+                hub(id: "M", name: "2026.10.20-0900", device: mac, title: "Weekly sync", started: "2026-10-20T14:00:00Z"),
+                hub(id: "P", name: "2026.10.19-0900-iphone", device: phone, started: "2026-10-19T14:00:00Z"),
+            ], thisDevice: "OTHER-PHONE")
         XCTAssertEqual(rows.map(\.title), ["Weekly sync", nil])
-        XCTAssertEqual(rows.map(\.source), [.mac, .mac])
+        XCTAssertEqual(rows.map(\.source), [.mac, .iphone])
+        XCTAssertEqual(rows.map(\.deviceName), ["MacBook Pro", "iPhone"])
         XCTAssertEqual(rows.map(\.hasAudio), [false, false])
-        // No readable meta: the date comes from the folder name, the length
-        // from the transcript.
-        XCTAssertEqual(rows[1].startedAt, SessionFolder.date(fromName: "2026.08.01-1015"))
-        XCTAssertEqual(rows[1].durationSeconds, 321)
+        XCTAssertEqual(rows[0].startedAt, ISO8601DateFormatter().date(from: "2026-10-20T14:00:00Z"))
+        XCTAssertEqual(rows.map(\.deviceDescription), ["MacBook Pro", "iPhone"])
+
+        let mine = RecordingSummary.merge(local: [], hub: [hub(id: "P", name: "x", device: phone)], thisDevice: "PHONE")
+        XCTAssertEqual(mine[0].deviceDescription, "this iPhone")
+    }
+
+    func testSearchUsesThePreviewUntilTheTranscriptIsCached() {
+        let session = hub(id: "M", name: "2026.10.20-0900", device: mac, preview: "Budget review first", title: "Sync")
+        let before = RecordingSummary.merge(local: [], hub: [session])
+        XCTAssertTrue(before[0].searchText.contains("budget review"))
+        XCTAssertTrue(before[0].searchText.contains("sync"))
+        XCTAssertFalse(before[0].searchText.contains("punch list"))
+
+        let after = RecordingSummary.merge(local: [], hub: [session], transcripts: ["M": transcript.fullText])
+        XCTAssertTrue(after[0].searchText.contains("punch list"))
+        XCTAssertEqual(after[0].preview, "Budget review first")
     }
 
     func testGroupsByDay() {
@@ -109,8 +171,9 @@ final class RecordingSummaryTests: XCTestCase {
         let now = ISO8601DateFormatter().date(from: "2026-10-26T18:00:00Z")!
         func row(_ iso: String) -> RecordingSummary {
             RecordingSummary(
-                name: iso, title: nil, startedAt: ISO8601DateFormatter().date(from: iso)!, durationSeconds: 0,
-                source: .iphone, stage: .transcribed, hasAudio: false, preview: "", searchText: "")
+                id: iso, hubID: nil, name: iso, title: nil, startedAt: ISO8601DateFormatter().date(from: iso)!,
+                durationSeconds: 0, source: .iphone, deviceName: nil, stage: .transcribed, failure: nil,
+                hasAudio: false, preview: "", revision: nil, searchText: "")
         }
         let groups = DayGroup.group(
             [

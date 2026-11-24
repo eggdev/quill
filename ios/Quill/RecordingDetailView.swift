@@ -5,13 +5,24 @@ import SwiftUI
 /// player. Tapping a line plays from there; while playing, the line being
 /// spoken is highlighted and kept in view.
 struct RecordingDetailView: View {
-    let recording: RecordingSummary
+    /// The row as it was tapped; `recording` follows the library's updates,
+    /// so a transcript that lands while this is open shows up.
+    let opened: RecordingSummary
     let library: Library
 
     @State private var transcript: Transcript?
     @State private var loading = true
     @State private var player = Player()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(recording: RecordingSummary, library: Library) {
+        opened = recording
+        self.library = library
+    }
+
+    private var recording: RecordingSummary {
+        library.recordings.first { $0.id == opened.id } ?? opened
+    }
 
     private var activeIndex: Int? {
         guard player.canPlay, player.positionMs > 0 || player.isPlaying else { return nil }
@@ -47,10 +58,12 @@ struct RecordingDetailView: View {
                 }
             }
         }
-        .task {
-            transcript = await library.transcript(for: recording)
+        .task(id: TranscriptKey(stage: recording.stage, revision: recording.revision)) {
+            if let fresh = await library.transcript(for: recording) { transcript = fresh }
             loading = false
-            if let folder = library.audioFolder(for: recording), let manifest = library.manifest(for: recording) {
+        }
+        .task {
+            if let folder = library.audioFolder(for: opened), let manifest = library.manifest(for: opened) {
                 await player.load(folder: folder, manifest: manifest)
             }
         }
@@ -66,9 +79,7 @@ struct RecordingDetailView: View {
             // An untitled recording's title is already its time.
             Text(recording.startedAt.formatted(date: .complete, time: recording.title == nil ? .omitted : .shortened))
                 .font(.subheadline.weight(.medium))
-            Text(
-                "\(Format.duration(seconds: recording.durationSeconds)), recorded on \(recording.source == .iphone ? "iPhone" : "Mac")"
-            )
+            Text("\(Format.duration(seconds: recording.durationSeconds)), recorded on \(recording.deviceDescription)")
             .font(.subheadline)
             .foregroundStyle(.secondary)
         }
@@ -103,14 +114,37 @@ struct RecordingDetailView: View {
         } else {
             switch recording.stage {
             case .waiting:
+                waiting
+            case .transcribing:
                 ContentUnavailableView(
-                    "Not sent yet", systemImage: "icloud.and.arrow.up",
-                    description: Text("This recording goes to your Mac for transcription once iCloud is available."))
-            case .transcribing, .transcribed:
+                    "Transcribing on your hub", systemImage: "waveform",
+                    description: Text("The transcript appears here when your hub finishes. The hub Mac needs to be on."))
+            case .transcribed:
                 ContentUnavailableView(
-                    "Transcribing on your Mac", systemImage: "laptopcomputer",
-                    description: Text("The transcript appears here when your Mac finishes. Your Mac needs to be on."))
+                    "Can't load the transcript", systemImage: "wifi.slash",
+                    description: Text("Your hub has it, but it can't be reached right now. Check that Tailscale is connected."))
+            case .failed:
+                ContentUnavailableView(
+                    "Transcription failed", systemImage: "exclamationmark.triangle",
+                    description: Text(recording.failure.map { "Your hub said: \($0)" } ?? "Your hub couldn't transcribe this recording."))
             }
+        }
+    }
+
+    @ViewBuilder private var waiting: some View {
+        switch library.hubState {
+        case .notSet:
+            ContentUnavailableView(
+                "Not sent yet", systemImage: "tray.and.arrow.up",
+                description: Text("Add your hub's address in Settings to send this recording for transcription."))
+        case .unreachable:
+            ContentUnavailableView(
+                "Waiting for your hub", systemImage: "tray.and.arrow.up",
+                description: Text("This recording sends when your hub can be reached. Check that Tailscale is connected."))
+        case .unknown, .reachable:
+            ContentUnavailableView(
+                "Sending to your hub", systemImage: "arrow.up.circle",
+                description: Text("The transcript appears here after your hub transcribes it."))
         }
     }
 
@@ -122,6 +156,12 @@ struct RecordingDetailView: View {
         }
         return ([title, ""] + lines).joined(separator: "\n")
     }
+}
+
+/// Reloads the transcript when the hub moves the session on.
+private struct TranscriptKey: Hashable {
+    var stage: RecordingSummary.Stage
+    var revision: Int?
 }
 
 private struct SegmentRow: View {

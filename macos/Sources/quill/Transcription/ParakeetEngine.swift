@@ -34,7 +34,7 @@ actor ParakeetEngine: TranscriptionEngine {
         self.manager = manager
     }
 
-    func transcribe(_ audio: URL) async throws -> [TranscriptSegment] {
+    func transcribe(_ audio: URL, diarize: Bool) async throws -> [TranscriptSegment] {
         guard let manager else { throw EngineError.notPrepared }
 
         // A track with no frames (recorder died before its first buffer)

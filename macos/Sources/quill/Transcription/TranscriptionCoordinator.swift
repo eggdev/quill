@@ -14,21 +14,48 @@ actor TranscriptionCoordinator {
         case failed(session: String)
     }
 
+    /// One session's progress, for the hub catalog.
+    enum Event: Sendable {
+        case started(URL)
+        case finished(URL)
+        /// `reason` is one line, fit for a status field.
+        case failed(URL, reason: String)
+    }
+
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
+    /// Set when the remote engine stayed down through every retry during this
+    /// drain; the rest of the queue goes to the local engine instead of
+    /// waiting on a dead host again.
+    private var remoteDown = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
+    private var eventHandler: (@Sendable (Event) async -> Void)?
+    private var notifies: @Sendable (URL) -> Bool = { _ in true }
 
     func setStatusHandler(_ handler: @escaping @Sendable (Status) -> Void) {
         statusHandler = handler
+    }
+
+    /// Awaited before the coordinator moves on, so the catalog sees
+    /// `started` before `finished` for every session.
+    func setEventHandler(_ handler: @escaping @Sendable (Event) async -> Void) {
+        eventHandler = handler
+    }
+
+    /// Which sessions get a "transcript ready" or "transcription failed"
+    /// notification. The hub turns them off for sessions a client uploaded:
+    /// the client tells its own user.
+    func setNotificationFilter(_ predicate: @escaping @Sendable (URL) -> Bool) {
+        notifies = predicate
     }
 
     /// Queue a finished session. With transcription disabled in config, the
     /// on_stop hook still fires — it just gets an untranscribed folder.
     func enqueue(_ sessionDir: URL) {
         guard Config.transcriptionEnabled() else {
-            runHook(for: sessionDir)
+            OnStopHook.run(for: sessionDir)
             return
         }
         queue.append(sessionDir)
@@ -37,12 +64,13 @@ actor TranscriptionCoordinator {
 
     /// Scan the recordings root for sessions that finished (meta.json exists)
     /// but were never transcribed. Folder names sort chronologically, so
-    /// oldest-first is a name sort.
+    /// oldest-first is a name sort. Hidden folders are skipped: the hub stages
+    /// uploads in `.incoming`.
     func resumePending(root: URL) {
         guard Config.transcriptionEnabled() else { return }
         guard
             let entries = try? FileManager.default.contentsOfDirectory(
-                at: root, includingPropertiesForKeys: nil
+                at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
             )
         else { return }
 
@@ -79,23 +107,30 @@ actor TranscriptionCoordinator {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
+            await eventHandler?(.started(dir))
             do {
                 let meeting = SessionMeta.meeting(in: dir)
-                try await transcribe(dir, meeting: meeting)
-                let name = meeting?.title ?? dir.lastPathComponent
-                notifyUser(title: "quill — transcript ready", body: name)
-                runHook(for: dir)
+                try await transcribePreferringRemote(dir, meeting: meeting)
+                await eventHandler?(.finished(dir))
+                if notifies(dir) {
+                    notifyUser(title: "quill — transcript ready", body: meeting?.title ?? dir.lastPathComponent)
+                }
+                OnStopHook.run(for: dir)
             } catch {
                 log(dir, "transcription failed: \(error)")
                 lastFailure = dir.lastPathComponent
-                notifyUser(
-                    title: "quill — transcription failed",
-                    body: "\(dir.lastPathComponent) — see transcribe.log"
-                )
+                await eventHandler?(.failed(dir, reason: Self.oneLine("\(error)")))
+                if notifies(dir) {
+                    notifyUser(
+                        title: "quill — transcription failed",
+                        body: "\(dir.lastPathComponent) — see transcribe.log"
+                    )
+                }
             }
         }
         await engine?.release()
         engine = nil
+        remoteDown = false
         publish(lastFailure.map { .failed(session: $0) } ?? .idle)
         draining = false
         // An enqueue that landed between the loop exiting and the release
@@ -103,32 +138,83 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
+    /// Waits before another try at the remote engine after it failed on its
+    /// side. A server that restarts, or that had its model unloaded during a
+    /// request, is usually back within these. After the last wait fails too,
+    /// the session goes to the local engine.
+    static let remoteRetryDelays: [Duration] = [.seconds(30), .seconds(120), .seconds(300)]
+
+    /// Transcribe with the configured engine. When the remote engine fails
+    /// on its side, wait and try it again before giving the session to the
+    /// local engine: a local transcript has no speaker labels, and nothing
+    /// replaces it later.
+    private func transcribePreferringRemote(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
+        var delays = Self.remoteRetryDelays[...]
+        while true {
+            do {
+                return try await transcribe(dir, meeting: meeting)
+            } catch let error as RemoteEngine.EngineError {
+                guard case .unreachable = error else { throw error }
+                await engine?.release()
+                engine = nil
+                if let delay = delays.popFirst() {
+                    log(dir, "\(error) — trying again in \(delay.components.seconds) s")
+                    try? await Task.sleep(for: delay)
+                } else {
+                    log(dir, "\(error) — transcribing locally")
+                    remoteDown = true
+                }
+            }
+        }
+    }
+
     private func transcribe(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
         // Both metadata schemas normalize to ordered (file, speaker, offset)
         // inputs — one per segment under v2, one per track under v1. Each
-        // segment transcribes independently and shifts onto the session
-        // clock, so timing gaps around a capture recovery stay visible.
+        // segment shifts onto the session clock, so timing gaps around a
+        // capture recovery stay visible.
         let (inputs, captureStatus) = try SessionMeta.readInputs(from: dir)
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
-        for input in inputs {
-            let audio = dir.appendingPathComponent(input.file)
-            guard FileManager.default.fileExists(atPath: audio.path) else {
-                log(dir, "skipping missing segment \(input.file)")
-                continue
+        for track in Self.tracks(inputs) {
+            let present = track.filter { input in
+                let found = FileManager.default.fileExists(atPath: dir.appendingPathComponent(input.file).path)
+                if !found { log(dir, "skipping missing segment \(input.file)") }
+                return found
             }
-            log(dir, "transcribing \(input.file) (\(engine.name))")
-            // One bad segment (empty, truncated) shouldn't cost us the rest —
-            // log it and keep going.
-            let segments: [TranscriptSegment]
+            guard let speaker = present.first?.speaker else { continue }
+            // One voice on the mic is the user; any other track may hold
+            // several people.
+            let diarize = speaker != "me"
+            let files = present.map { dir.appendingPathComponent($0.file) }
+            log(dir, "transcribing \(present.map(\.file).joined(separator: ", ")) (\(engine.name))")
+            var results: [[TranscriptSegment]]?
             do {
-                segments = try await engine.transcribe(audio)
-            } catch {
-                log(dir, "skipping \(input.file): \(error)")
-                continue
+                results = try await engine.transcribe(track: files, diarize: diarize)
+            } catch RemoteEngine.EngineError.rejected(let why) where files.count > 1 {
+                // One bad file shouldn't cost the rest of the track; retry
+                // file by file below.
+                log(dir, "track rejected (\(why)) — retrying file by file")
             }
-            merged += Transcript.shifted(segments, speaker: input.speaker, offsetMs: input.offsetMs)
+            for (i, input) in present.enumerated() {
+                let segments: [TranscriptSegment]
+                if let results {
+                    segments = results[i]
+                } else {
+                    // One bad segment (empty, truncated) shouldn't cost us the
+                    // rest — log it and keep going.
+                    do {
+                        segments = try await engine.transcribe(files[i], diarize: diarize)
+                    } catch RemoteEngine.EngineError.unreachable(let url, let why) {
+                        throw RemoteEngine.EngineError.unreachable(url, why)
+                    } catch {
+                        log(dir, "skipping \(input.file): \(error)")
+                        continue
+                    }
+                }
+                merged += Transcript.shifted(segments, speaker: input.speaker, offsetMs: input.offsetMs)
+            }
         }
         merged.sort { $0.start_ms < $1.start_ms }
 
@@ -142,10 +228,33 @@ actor TranscriptionCoordinator {
         log(dir, "done — \(merged.count) segments")
     }
 
+    /// Consecutive inputs of one track. Segment files of a track are listed
+    /// together and in order in both metadata schemas.
+    static func tracks(_ inputs: [SessionMeta.TrackInput]) -> [[SessionMeta.TrackInput]] {
+        var out: [[SessionMeta.TrackInput]] = []
+        for input in inputs {
+            if let last = out.last?.last, last.speaker == input.speaker {
+                out[out.count - 1].append(input)
+            } else {
+                out.append([input])
+            }
+        }
+        return out
+    }
+
     private func preparedEngine() async throws -> TranscriptionEngine {
         if let engine { return engine }
-        let configured = Config.transcriptionEngine()
-        if configured != "parakeet" {
+        switch Config.transcriptionEngine() {
+        case "remote" where !remoteDown:
+            if let url = Config.transcriptionURL() {
+                let engine = try await RemoteEngine.connect(url)
+                self.engine = engine
+                return engine
+            }
+            FileHandle.standardError.write(Data("warning: transcription.url missing or invalid — using parakeet\n".utf8))
+        case "parakeet", "remote":
+            break
+        case let configured:
             FileHandle.standardError.write(
                 Data(
                     "warning: unknown transcription engine \"\(configured)\" — using parakeet\n".utf8
@@ -157,31 +266,14 @@ actor TranscriptionCoordinator {
         return engine
     }
 
-    /// Fires the configured on_stop shell command with the session directory
-    /// as its sole argument, after the transcript exists (or immediately after
-    /// recording when transcription is disabled).
-    private func runHook(for dir: URL) {
-        guard let cmd = Config.onStop() else { return }
-        let task = Process()
-        task.launchPath = "/bin/sh"
-        task.arguments = ["-c", "\(cmd) \"$0\"", dir.path]
-        do {
-            try task.run()
-        } catch {
-            log(dir, "on_stop hook failed to launch: \(error)")
-        }
+    private func log(_ dir: URL, _ message: String) {
+        SessionLog.append(dir, message)
     }
 
-    private func log(_ dir: URL, _ message: String) {
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
-        let url = dir.appendingPathComponent("transcribe.log")
-        if let handle = FileHandle(forWritingAtPath: url.path) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? Data(line.utf8).write(to: url)
-        }
+    /// First line of an error description, at most 300 characters.
+    static func oneLine(_ text: String) -> String {
+        let first = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return String(first.prefix(300))
     }
 
     private func publish(_ status: Status) {
@@ -213,12 +305,19 @@ struct Transcript: Codable {
     ) -> [Segment] {
         segments.map {
             Segment(
-                speaker: speaker,
+                speaker: label(track: speaker, index: $0.speaker),
                 start_ms: Int($0.start * 1000) + offsetMs,
                 end_ms: Int($0.end * 1000) + offsetMs,
                 text: $0.text
             )
         }
+    }
+
+    /// A diarized voice within one track: "speaker 2" on the iPhone's room
+    /// track, "them 2" on a call.
+    static func label(track: String, index: Int?) -> String {
+        guard let index else { return track }
+        return "\(track == "room" ? "speaker" : track) \(index + 1)"
     }
 
     /// Write transcript.json and render transcript.md. Both writes are atomic
