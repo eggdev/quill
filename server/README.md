@@ -64,18 +64,39 @@ In `~/.config/quill/config.json`:
 }
 ```
 
-Run `quill doctor` to check the connection. If the server is down, the Mac transcribes the session with local Parakeet and writes the reason to the session's `transcribe.log`.
+Run `quill doctor` to check the connection. If the server fails or does not answer, the Mac tries it again after 30 seconds, 2 minutes and 5 minutes. If it is still down, the Mac transcribes the session with local Parakeet and writes the reason to the session's `transcribe.log`.
 
-## 3. API
+## 3. Share the GPU host: load the model on demand
+
+`quill-vllm.service` keeps the model loaded, and the model keeps its share of memory. On a host that also runs other models, [llama-swap](https://github.com/mostlygeek/llama-swap) can start Nemotron for the first request and stop it after a quiet period.
+
+1. Use llama-swap in place of `quill-vllm`. Both listen on `127.0.0.1:8092`, so the adapter needs no change:
+
+   ```sh
+   systemctl --user disable --now quill-vllm
+   mkdir -p ~/.config/llama-swap/models
+   cp llama-swap/nemotron-transcribe.sh ~/.config/llama-swap/models/
+   cp llama-swap/config.example.yaml ~/.config/llama-swap/config.yaml
+   ```
+
+2. Run `llama-swap --config ~/.config/llama-swap/config.yaml --listen 127.0.0.1:8092` as a user service, and make `quill-server.service` start after it in place of `quill-vllm.service`.
+
+What changes for quill:
+
+- **The first transcription after a quiet period is slow.** vLLM needs 5 to 7 minutes to load the model on a DGX Spark (most of that reads 33 GB of weights). The Mac waits up to 30 minutes for one answer, so the request does not fail. Later requests run at about 10 times real time until `ttl` seconds pass without one.
+- **`GET /health` answers `ok` while the model is not loaded.** It reports that llama-swap is up, which is what the Mac needs to know before it sends audio.
+- **Another model can push Nemotron out.** If llama-swap or a memory guard stops Nemotron during a request, the request fails with a 5xx status. The Mac then tries again, as described in section 2.
+
+## 4. API
 
 | Request | Response |
 |---|---|
-| `GET /health` | `{"ok": true, "model": "..."}`, or 503 while vLLM loads |
+| `GET /health` | `{"ok": true, "model": "..."}`, or 503 when the model server does not answer |
 | `POST /v1/transcribe?diarize=true`, multipart with one `audio` part per segment file, in order | `{"engine", "model", "files": [{"duration", "segments": [{"start", "end", "text", "speaker"}]}]}` |
 
 Times are relative to each file. `speaker` is a 0-based index in order of first appearance across the whole track. It is `null` when `diarize=false` or when the model hears only one voice. The Mac sends `diarize=false` for the `me` track.
 
-## 4. Development
+## 5. Development
 
 ```sh
 uv run pytest
@@ -83,7 +104,7 @@ uv run pytest
 
 The tests need no GPU. They cover the grouping rules in `quill_server/align.py` and run the engine against a fake vLLM.
 
-## 5. Known limits
+## 6. Known limits
 
 - The model is trained on recordings up to one hour. Longer tracks go in 55-minute windows, and a voice's number can change between windows.
 - The speaker prompt from the model card names four tags. More voices than that may share a tag.
