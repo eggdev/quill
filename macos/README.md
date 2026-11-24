@@ -292,8 +292,9 @@ Optional, at `~/.config/quill/config.json`:
 - `transcription.engine` — `parakeet` (default, on this Mac) or `remote`.
   `remote` sends each recording to a [quill server](../server/README.md) on
   your own network, which adds speaker labels (`speaker 1`, `speaker 2`). When
-  the server can't be reached, quill transcribes locally and logs why in the
-  session's `transcribe.log`.
+  the server fails or can't be reached, quill tries it again after 30 seconds,
+  2 minutes and 5 minutes. If it is still down, quill transcribes locally and
+  logs why in the session's `transcribe.log`.
 - `transcription.url` — the server's HTTPS address for `remote`, e.g.
   `https://spark.tailnet.ts.net:8091`.
 - `mic_voice_processing` — Apple's echo cancellation on the mic (default off).

@@ -25,8 +25,9 @@ actor TranscriptionCoordinator {
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
-    /// Set when the remote engine failed during this drain; the rest of the
-    /// queue goes to the local engine instead of retrying a dead host.
+    /// Set when the remote engine stayed down through every retry during this
+    /// drain; the rest of the queue goes to the local engine instead of
+    /// waiting on a dead host again.
     private var remoteDown = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
@@ -109,16 +110,7 @@ actor TranscriptionCoordinator {
             await eventHandler?(.started(dir))
             do {
                 let meeting = SessionMeta.meeting(in: dir)
-                do {
-                    try await transcribe(dir, meeting: meeting)
-                } catch let error as RemoteEngine.EngineError {
-                    guard case .unreachable = error else { throw error }
-                    log(dir, "\(error) — transcribing locally")
-                    await engine?.release()
-                    engine = nil
-                    remoteDown = true
-                    try await transcribe(dir, meeting: meeting)
-                }
+                try await transcribePreferringRemote(dir, meeting: meeting)
                 await eventHandler?(.finished(dir))
                 if notifies(dir) {
                     notifyUser(title: "quill — transcript ready", body: meeting?.title ?? dir.lastPathComponent)
@@ -144,6 +136,36 @@ actor TranscriptionCoordinator {
         // An enqueue that landed between the loop exiting and the release
         // finishing would otherwise sit until the next enqueue.
         drainIfIdle()
+    }
+
+    /// Waits before another try at the remote engine after it failed on its
+    /// side. A server that restarts, or that had its model unloaded during a
+    /// request, is usually back within these. After the last wait fails too,
+    /// the session goes to the local engine.
+    static let remoteRetryDelays: [Duration] = [.seconds(30), .seconds(120), .seconds(300)]
+
+    /// Transcribe with the configured engine. When the remote engine fails
+    /// on its side, wait and try it again before giving the session to the
+    /// local engine: a local transcript has no speaker labels, and nothing
+    /// replaces it later.
+    private func transcribePreferringRemote(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
+        var delays = Self.remoteRetryDelays[...]
+        while true {
+            do {
+                return try await transcribe(dir, meeting: meeting)
+            } catch let error as RemoteEngine.EngineError {
+                guard case .unreachable = error else { throw error }
+                await engine?.release()
+                engine = nil
+                if let delay = delays.popFirst() {
+                    log(dir, "\(error) — trying again in \(delay.components.seconds) s")
+                    try? await Task.sleep(for: delay)
+                } else {
+                    log(dir, "\(error) — transcribing locally")
+                    remoteDown = true
+                }
+            }
+        }
     }
 
     private func transcribe(_ dir: URL, meeting: SessionMeta.Meeting?) async throws {
