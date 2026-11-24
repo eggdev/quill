@@ -11,13 +11,39 @@ for what it does and doesn't do (it can't record phone calls). The hub API is
 
 ## Set up
 
-1. Open `Quill.xcodeproj` in Xcode and sign in under **Xcode → Settings →
-   Accounts** with your Apple Developer account.
-2. Select the **Quill** and **QuillWidgetsExtension** targets in turn, and under
-   **Signing & Capabilities** choose your team. Xcode registers the bundle IDs
-   (`com.eggdev.quill`, `com.eggdev.quill.widgets`).
-3. Connect your iPhone, choose it as the run destination, and run.
+You need Xcode, an Apple Developer team, and the iPhone.
+
+1. In Xcode, sign in under **Xcode → Settings → Accounts** with your Apple
+   Developer account.
+2. Connect the iPhone to the Mac by cable, unlock it, and tap **Trust**. The
+   iPhone needs **Developer Mode** on (Settings → Privacy & Security).
+3. From the repository root, run:
+
+   ```sh
+   ./scripts/install-ios
+   ```
+
+   The script builds the app, signs it, installs it on the iPhone, and opens
+   it. Run it again to install a newer version; recordings and settings stay.
 4. On the iPhone: **Settings → Action Button → Shortcut → Quill → Record**.
+
+After the first install, the iPhone can be on the same Wi-Fi as the Mac
+instead of on the cable. An app signed by a paid developer team runs for one
+year, then needs a new install. A free team's app runs for 7 days.
+
+### Signing
+
+- Your team ID is not in git. The script finds it from your development
+  certificate and saves it in `Config/Local.xcconfig`. If it can't, run it
+  with `QUILL_TEAM_ID=<your team ID>`.
+- The bundle IDs are `com.eggdev.quill` and `com.eggdev.quill.widgets`. A
+  bundle ID belongs to one team: to build with another team, change both in
+  the target settings.
+- A Mac with no Apple account in Xcode can sign with an App Store Connect API
+  key. Set `QUILL_ASC_KEY_PATH`, `QUILL_ASC_KEY_ID` and `QUILL_ASC_ISSUER_ID`
+  when you run the script.
+- To run from Xcode instead, open `Quill.xcodeproj`, choose the iPhone as the
+  run destination, and run. Xcode reads the team from `Config/Local.xcconfig`.
 
 ## Connect to your hub
 

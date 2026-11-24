@@ -1,0 +1,116 @@
+#!/bin/sh
+# Build Quill for iPhone and install it on your iPhone.
+#
+#   ./scripts/install-ios
+#
+# Needs Xcode, an Apple Developer team, and an iPhone that this Mac has
+# paired with (connect it by cable once and tap Trust). After that the iPhone
+# can be on the same Wi-Fi instead of the cable. It must be unlocked.
+#
+# Signing uses one of:
+#   - the Apple account you added in Xcode > Settings > Accounts, or
+#   - an App Store Connect API key, for a Mac without that account:
+#       QUILL_ASC_KEY_PATH=/path/AuthKey_XXXX.p8 QUILL_ASC_KEY_ID=XXXX \
+#       QUILL_ASC_ISSUER_ID=<issuer uuid> ./scripts/install-ios
+#
+# Other settings:
+#   QUILL_TEAM_ID   your team ID, when the script can't find it
+#   QUILL_DEVICE    the iPhone's name or UDID, when more than one is paired
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(dirname -- "$script_dir")
+ios_dir="$repo_root/ios"
+local_config="$ios_dir/Config/Local.xcconfig"
+derived="$ios_dir/.build/xcode"
+bundle_id=com.eggdev.quill
+
+fail() {
+    printf '%s\n' "$@" >&2
+    exit 1
+}
+
+# 1. The team. It lives in Config/Local.xcconfig, which is not in git.
+if ! grep -q '^[[:space:]]*DEVELOPMENT_TEAM[[:space:]]*=[[:space:]]*[A-Z0-9]' "$local_config" 2>/dev/null; then
+    team=${QUILL_TEAM_ID:-}
+    if [ -z "$team" ]; then
+        # The team ID is the organizational unit of each development
+        # certificate in the keychain.
+        teams=$(security find-certificate -a -c "Apple Development" -p 2>/dev/null \
+            | awk '/BEGIN CERTIFICATE/ { cert = "" }
+                   { cert = cert $0 "\n" }
+                   /END CERTIFICATE/ {
+                       cmd = "openssl x509 -noout -subject -nameopt multiline"
+                       printf "%s", cert | cmd
+                       close(cmd)
+                   }' \
+            | sed -n 's/^ *organizationalUnitName *= *//p' | sort -u)
+        case $(printf '%s' "$teams" | grep -c .) in
+        1) team=$teams ;;
+        0) fail "No Apple Developer team found on this Mac." \
+            "Run again with your team ID: QUILL_TEAM_ID=ABCDE12345 $0" ;;
+        *) fail "More than one Apple Developer team found:" "$teams" \
+            "Run again with the one to use: QUILL_TEAM_ID=ABCDE12345 $0" ;;
+        esac
+    fi
+    printf 'DEVELOPMENT_TEAM = %s\n' "$team" >>"$local_config"
+    printf 'saved team %s to %s\n' "$team" "$local_config"
+fi
+
+# 2. The iPhone.
+devices=$(mktemp)
+trap 'rm -f "$devices"' EXIT
+xcrun devicectl list devices --json-output "$devices" >/dev/null 2>&1 \
+    || fail "Could not list devices. Is Xcode installed and opened once?"
+device=$(QUILL_DEVICE=${QUILL_DEVICE:-} python3 - "$devices" <<'PY'
+import json, os, sys
+
+want = os.environ["QUILL_DEVICE"].strip().lower()
+phones = []
+for d in json.load(open(sys.argv[1]))["result"]["devices"]:
+    hardware = d.get("hardwareProperties", {})
+    if hardware.get("reality") != "physical" or hardware.get("platform") != "iOS":
+        continue
+    if d.get("connectionProperties", {}).get("pairingState") != "paired":
+        continue
+    name = d.get("deviceProperties", {}).get("name", "")
+    udid = hardware.get("udid", "")
+    if want and want not in (name.lower(), udid.lower()):
+        continue
+    phones.append((udid, name))
+
+if len(phones) == 1:
+    print(phones[0][0])
+elif not phones:
+    sys.exit("No paired iPhone found. Connect it by cable, unlock it, and tap Trust.")
+else:
+    names = "\n".join(f"  {name}  {udid}" for udid, name in phones)
+    sys.exit(f"More than one iPhone is paired:\n{names}\nRun again with QUILL_DEVICE set to a name or UDID.")
+PY
+) || exit 1
+
+# 3. Build and sign. Xcode makes the certificate and the provisioning
+# profile, and registers the iPhone with the team.
+set -- -allowProvisioningUpdates -allowProvisioningDeviceRegistration
+if [ -n "${QUILL_ASC_KEY_PATH:-}" ]; then
+    set -- "$@" \
+        -authenticationKeyPath "$QUILL_ASC_KEY_PATH" \
+        -authenticationKeyID "${QUILL_ASC_KEY_ID:?set QUILL_ASC_KEY_ID}" \
+        -authenticationKeyIssuerID "${QUILL_ASC_ISSUER_ID:?set QUILL_ASC_ISSUER_ID}"
+fi
+
+printf 'building Quill for iPhone %s\n' "$device"
+log="$ios_dir/.build/install-ios.log"
+mkdir -p "$ios_dir/.build"
+if ! xcodebuild -project "$ios_dir/Quill.xcodeproj" -scheme Quill -configuration Release \
+    -destination "id=$device" -derivedDataPath "$derived" "$@" build >"$log" 2>&1; then
+    grep -E 'error:|errors? generated|BUILD FAILED' "$log" | sort -u | head -20 >&2
+    fail "Build failed. Full log: $log"
+fi
+
+# 4. Install and open.
+app="$derived/Build/Products/Release-iphoneos/Quill.app"
+xcrun devicectl device install app --device "$device" "$app"
+xcrun devicectl device process launch --device "$device" "$bundle_id" >/dev/null 2>&1 \
+    || printf 'installed; unlock the iPhone and open Quill\n'
+printf 'Quill is on the iPhone\n'

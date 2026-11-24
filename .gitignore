@@ -13,3 +13,8 @@ obj/
 
 # Xcode per-user state
 xcuserdata/
+
+# Per-developer signing settings for the iPhone app
+ios/Config/Local.xcconfig
+# scripts/install-ios build output
+ios/.build/

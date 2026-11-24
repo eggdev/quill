@@ -14,6 +14,15 @@
   upload later. The menu shows upload progress. A Mac that becomes a client
   also sends the recordings it transcribed itself, one at a time and after
   any new recording, and takes the hub's transcript in their place.
+- When the transcription server fails or does not answer, quill now tries it
+  again after 30 seconds, 2 minutes and 5 minutes before it transcribes the
+  session locally. A server that restarts, or that loads its model on demand,
+  no longer costs a session its speaker labels.
+- Added `server/llama-swap/`: a setup that loads the Nemotron model on demand
+  and unloads it when idle, for a GPU host that also runs other models.
+- Added `scripts/install-ios`: builds Quill for iPhone, signs it, and installs
+  it on a paired iPhone in one step. The Apple Developer team now comes from
+  `ios/Config/Local.xcconfig`, which is not in git.
 - `quill doctor` reports the hub role, the hub's catalog, and, on a client,
   whether the hub answers.
 - Added Quill for iPhone (`ios/`): records the microphone from the Action
